@@ -1,0 +1,29 @@
+{
+  "version": "1.0.0",
+  "name": "Lumi Stats",
+  "identifier": "lumi_stats",
+  "author": "Gwen",
+  "github": "https://github.com/lumiverse-extensions/lumi-stats",
+  "homepage": "https://github.com/lumiverse-extensions/lumi-stats",
+  "description": "Schema-driven roleplay stats, character dossiers, two-phase grounded calibration, extreme UI/tab customization, and native Lumiverse macro/Cortex integration.",
+  "permissions": [
+    "generation",
+    "interceptor",
+    "chat_mutation",
+    "chats",
+    "characters",
+    "personas",
+    "presets",
+    "memories",
+    "tools",
+    "images",
+    "ui_panels",
+    "app_manipulation",
+    "regex_scripts"
+  ],
+  "entry_backend": "dist/backend.js",
+  "entry_frontend": "dist/frontend.js",
+  "entry_frontend_widget": "dist/widget.js",
+  "interceptorTimeoutMs": 30000,
+  "minimum_lumiverse_version": "0.8.0"
+}
