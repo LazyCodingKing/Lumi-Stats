@@ -612,6 +612,17 @@ export function createDefaultTemplate(): LumiStatsTemplate {
         ],
       }),
       createStatSchema({
+        id: 'present',
+        label: 'Present & Away',
+        icon: '👥',
+        scope: 'scene',
+        kind: 'text',
+        defaultValue: 'Present: [], Away: []',
+        volatility: 'momentary',
+        pinnedToHeader: true,
+        triggerCues: 'Format: Present: [List NPCs present in the scene], Away: [List NPCs away/offscreen]. Update EVERY turn whenever anyone enters, leaves, or the scene moves to a new location.',
+      }),
+      createStatSchema({
         id: 'world_tension',
         label: 'Scene Tension Clock',
         icon: '⏱️',

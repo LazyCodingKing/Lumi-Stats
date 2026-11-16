@@ -175,18 +175,27 @@ export function buildGameStatusPillStrip(
     main.append(stack);
   }
 
-  const pinnedSchemas = show.pinnedStats
+  const allPinned = show.pinnedStats
     ? template.stats.filter(
         s => s.enabled && (s.pinnedToHeader || s.showIn?.pinnedHeader),
       )
     : [];
-  for (const schema of pinnedSchemas.slice(0, 3)) {
+  const presenceSchema = allPinned.find(s => s.id === 'present' || s.id === 'scene_presence');
+  const otherPinned = allPinned.filter(s => s.id !== 'present' && s.id !== 'scene_presence').slice(0, 3);
+  const pinnedSchemas = presenceSchema ? [presenceSchema, ...otherPinned] : otherPinned;
+
+  for (const schema of pinnedSchemas) {
     const isChar = schema.scope === 'character';
     const firstPresent = presentActors[0] ?? Object.values(state.characters)[0];
     const runtime = isChar ? firstPresent?.meters[schema.id] : state.stats[schema.id];
-    if (!runtime?.calibrated) continue;
+    const isPresenceStat = schema.id === 'present' || schema.id === 'scene_presence';
+    const allActors = Object.values(state.characters);
+    if (!runtime?.calibrated && !(isPresenceStat && allActors.length > 0)) continue;
 
-    const val = runtime.value;
+    const val =
+      isPresenceStat && allActors.length > 0 && !runtime?.calibrated
+        ? `Present: [${presentActors.map(a => a.name).join(', ')}], Away: [${allActors.filter(a => !a.present).map(a => a.name).join(', ')}]`
+        : runtime!.value;
     const d = isChar
       ? (firstPresent ? deltas.characterDeltas[firstPresent.id]?.[schema.id] ?? 0 : 0)
       : (deltas.statDeltas[schema.id] ?? 0);

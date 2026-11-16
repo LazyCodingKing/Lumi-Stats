@@ -47,16 +47,31 @@ let activeStatsFilter: StatsFilterCategory = 'all';
 let statsSearchQuery = '';
 
 const QUICK_ADD_STAT_PRESETS: ReadonlyArray<{
+  id?: string;
   label: string;
   icon: string;
   scope: StatScope;
   kind: StatValueKind;
   min: number;
   max: number;
-  defaultValue: number;
+  defaultValue: number | string;
   volatility: StatVolatility;
+  pinnedToHeader?: boolean;
   triggerCues: string;
 }> = [
+  {
+    id: 'present',
+    label: 'Present & Away',
+    icon: '👥',
+    scope: 'scene',
+    kind: 'text',
+    min: 0,
+    max: 100,
+    defaultValue: 'Present: [], Away: []',
+    volatility: 'momentary',
+    pinnedToHeader: true,
+    triggerCues: 'Format: Present: [List NPCs present in the scene], Away: [List NPCs away/offscreen]. Update EVERY turn whenever anyone enters, leaves, or the scene moves to a new location.',
+  },
   {
     label: 'Blush & Fluster',
     icon: '💓',
@@ -275,11 +290,13 @@ export function renderStudioStatsTab(
   });
   const quickRow = el('div', 'ls-row');
   for (const item of QUICK_ADD_STAT_PRESETS) {
-    const exists = tpl.stats.some(s => s.id === slugifyKey(item.label, 'stat'));
+    const targetId = item.id ?? slugifyKey(item.label, 'stat');
+    const exists = tpl.stats.some(s => s.id === targetId);
     const b = btn(
       `${exists ? '✓ ' : '+ '}${item.icon} ${item.label}`,
       () => {
         const created = createStatSchema({
+          ...(item.id ? { id: item.id } : {}),
           label: item.label,
           icon: item.icon,
           scope: item.scope,
@@ -288,6 +305,7 @@ export function renderStudioStatsTab(
           max: item.max,
           defaultValue: item.defaultValue,
           volatility: item.volatility,
+          ...(item.pinnedToHeader ? { pinnedToHeader: true } : {}),
           triggerCues: item.triggerCues,
         });
         saveTemplatePatch(
