@@ -25,6 +25,59 @@ function scrubUnicodeSpacesForJson(raw: string): string {
     .replace(/[\u200B-\u200D\uFEFF]/g, '');
 }
 
+function sanitizeJsonControlCharsAndComments(raw: string): string {
+  let out = '';
+  let inString = false;
+  let escaped = false;
+  for (let i = 0; i < raw.length; i++) {
+    const ch = raw[i]!;
+    if (inString) {
+      if (escaped) {
+        out += ch;
+        escaped = false;
+        continue;
+      }
+      if (ch === '\\') {
+        out += ch;
+        escaped = true;
+        continue;
+      }
+      if (ch === '"') {
+        out += ch;
+        inString = false;
+        continue;
+      }
+      if (ch === '\n') {
+        out += '\\n';
+        continue;
+      }
+      if (ch === '\r') {
+        if (raw[i + 1] !== '\n') out += '\\r';
+        continue;
+      }
+      if (ch === '\t') {
+        out += '\\t';
+        continue;
+      }
+      if (ch.charCodeAt(0) < 0x20) {
+        continue;
+      }
+      out += ch;
+      continue;
+    }
+
+    if (ch === '/' && raw[i + 1] === '/') {
+      const nl = raw.indexOf('\n', i + 2);
+      if (nl < 0) break;
+      i = nl - 1;
+      continue;
+    }
+    if (ch === '"') inString = true;
+    out += ch;
+  }
+  return out;
+}
+
 function closeTruncatedJson(raw: string): string {
   const s = scrubUnicodeSpacesForJson(raw).trim();
   if (!s.startsWith('{') && !s.startsWith('[')) return s;
@@ -49,7 +102,10 @@ function closeTruncatedJson(raw: string): string {
   }
   if (!inString && !stack.length) return s;
   let out = s;
-  if (inString) out += '"';
+  if (inString) {
+    if (escaped) out = out.slice(0, -1);
+    out += '"';
+  }
   out = out.replace(/:\s*(?:t(?:r(?:u)?)?|f(?:a(?:l(?:s)?)?)?|n(?:u(?:l)?)?|-?\d+\.)\s*$/i, ': null');
   out = out.replace(/[,:\s]+$/, '');
   if (/\{\s*"[^"]*"\s*$|,\s*"[^"]*"\s*$/.test(out) && stack.at(-1) === '}') {
@@ -60,8 +116,8 @@ function closeTruncatedJson(raw: string): string {
 }
 
 /**
- * Parses JSON emitted by an LLM, scrubbing Braille blanks (`U+2800`) and exotic spaces
- * first so `JSON.parse` never fails on Braille-indented `<lumi-stats>` blocks.
+ * Parses JSON emitted by an LLM, scrubbing Braille blanks (`U+2800`), exotic spaces,
+ * literal newlines inside strings, and JS-style comments so `JSON.parse` succeeds reliably.
  */
 export function parseExtractedJson(rawText: string): ExtractedTurnPatch {
   const unicodeCleaned = scrubUnicodeSpacesForJson(rawText);
@@ -70,28 +126,31 @@ export function parseExtractedJson(rawText: string): ExtractedTurnPatch {
     .trim();
   if (!stripped) throw new Error('Empty response from extractor model.');
 
+  const pushWithBraceSlice = (list: string[], block: string | undefined) => {
+    const t = block?.trim();
+    if (!t) return;
+    list.push(t);
+    const fb = t.indexOf('{');
+    const lb = t.lastIndexOf('}');
+    if (fb >= 0) {
+      list.push(lb > fb ? t.slice(fb, lb + 1) : t.slice(fb));
+    }
+  };
+
   const candidates: string[] = [];
-  const tagMatch = stripped.match(/<(?:lumi-stats|lumi_stats|lumi-tracker|worldweave)\b[^>]*>([\s\S]*?)(?:<\/(?:lumi-stats|lumi_stats|lumi-tracker|worldweave)>|$)/i);
-  if (tagMatch?.[1]) candidates.push(tagMatch[1].trim());
+  const tagMatch = stripped.match(/<(?:lumi-stats|lumi_stats|lumi-tracker|worldweave|tracker)\b[^>]*>([\s\S]*?)(?:<\/(?:lumi-stats|lumi_stats|lumi-tracker|worldweave|tracker)>|$)/i);
+  pushWithBraceSlice(candidates, tagMatch?.[1]);
 
-  const fenceMatch = stripped.match(/```(?:json|lumi-stats|lumi-tracker)?\s*([\s\S]*?)\s*```/i);
-  if (fenceMatch?.[1]) candidates.push(fenceMatch[1].trim());
+  const fenceMatch = stripped.match(/```(?:json|lumi-stats|lumi_stats|lumi-tracker|tracker|sim)?\s*([\s\S]*?)\s*```/i);
+  pushWithBraceSlice(candidates, fenceMatch?.[1]);
 
-  const firstBrace = stripped.indexOf('{');
-  const lastBrace = stripped.lastIndexOf('}');
-  if (firstBrace >= 0) {
-    candidates.push(
-      lastBrace > firstBrace
-        ? stripped.slice(firstBrace, lastBrace + 1)
-        : stripped.slice(firstBrace),
-    );
-  }
+  pushWithBraceSlice(candidates, stripped);
 
   let lastErr: unknown;
   for (const cand of candidates) {
-    const cleanCand = scrubUnicodeSpacesForJson(cand);
+    const cleanCand = sanitizeJsonControlCharsAndComments(scrubUnicodeSpacesForJson(cand));
     const preserveSignedPlus = cleanCand.replace(
-      /(:\s*)\+(\d+(?:\.\d+)?)(?=\s*[,}\]\r\n])/g,
+      /(:\s*)\+\s*(\d+(?:\.\d+)?)(?=\s*[,}\]\r\n])/g,
       '$1"+$2"',
     );
     const removeTrailingCommas = preserveSignedPlus.replace(

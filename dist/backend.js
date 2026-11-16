@@ -3574,6 +3574,63 @@ class RenderProseCache {
 function scrubUnicodeSpacesForJson(raw) {
   return raw.replace(/[\u2800\u00A0\u1680\u180E\u2000-\u200A\u202F\u205F\u2060\u3000]/g, " ").replace(/[\u200B-\u200D\uFEFF]/g, "");
 }
+function sanitizeJsonControlCharsAndComments(raw) {
+  let out = "";
+  let inString = false;
+  let escaped = false;
+  for (let i = 0;i < raw.length; i++) {
+    const ch = raw[i];
+    if (inString) {
+      if (escaped) {
+        out += ch;
+        escaped = false;
+        continue;
+      }
+      if (ch === "\\") {
+        out += ch;
+        escaped = true;
+        continue;
+      }
+      if (ch === '"') {
+        out += ch;
+        inString = false;
+        continue;
+      }
+      if (ch === `
+`) {
+        out += "\\n";
+        continue;
+      }
+      if (ch === "\r") {
+        if (raw[i + 1] !== `
+`)
+          out += "\\r";
+        continue;
+      }
+      if (ch === "\t") {
+        out += "\\t";
+        continue;
+      }
+      if (ch.charCodeAt(0) < 32) {
+        continue;
+      }
+      out += ch;
+      continue;
+    }
+    if (ch === "/" && raw[i + 1] === "/") {
+      const nl = raw.indexOf(`
+`, i + 2);
+      if (nl < 0)
+        break;
+      i = nl - 1;
+      continue;
+    }
+    if (ch === '"')
+      inString = true;
+    out += ch;
+  }
+  return out;
+}
 function closeTruncatedJson(raw) {
   const s = scrubUnicodeSpacesForJson(raw).trim();
   if (!s.startsWith("{") && !s.startsWith("["))
@@ -3603,8 +3660,11 @@ function closeTruncatedJson(raw) {
   if (!inString && !stack.length)
     return s;
   let out = s;
-  if (inString)
+  if (inString) {
+    if (escaped)
+      out = out.slice(0, -1);
     out += '"';
+  }
   out = out.replace(/:\s*(?:t(?:r(?:u)?)?|f(?:a(?:l(?:s)?)?)?|n(?:u(?:l)?)?|-?\d+\.)\s*$/i, ": null");
   out = out.replace(/[,:\s]+$/, "");
   if (/\{\s*"[^"]*"\s*$|,\s*"[^"]*"\s*$/.test(out) && stack.at(-1) === "}") {
@@ -3619,22 +3679,27 @@ function parseExtractedJson(rawText) {
   const stripped = unicodeCleaned.replace(/<(?:think|thinking|reasoning|analysis|scratchpad)\b[^>]*>[\s\S]*?<\/(?:think|thinking|reasoning|analysis|scratchpad)\s*>/gi, "").trim();
   if (!stripped)
     throw new Error("Empty response from extractor model.");
+  const pushWithBraceSlice = (list, block) => {
+    const t = block?.trim();
+    if (!t)
+      return;
+    list.push(t);
+    const fb = t.indexOf("{");
+    const lb = t.lastIndexOf("}");
+    if (fb >= 0) {
+      list.push(lb > fb ? t.slice(fb, lb + 1) : t.slice(fb));
+    }
+  };
   const candidates = [];
-  const tagMatch = stripped.match(/<(?:lumi-stats|lumi_stats|lumi-tracker|worldweave)\b[^>]*>([\s\S]*?)(?:<\/(?:lumi-stats|lumi_stats|lumi-tracker|worldweave)>|$)/i);
-  if (tagMatch?.[1])
-    candidates.push(tagMatch[1].trim());
-  const fenceMatch = stripped.match(/```(?:json|lumi-stats|lumi-tracker)?\s*([\s\S]*?)\s*```/i);
-  if (fenceMatch?.[1])
-    candidates.push(fenceMatch[1].trim());
-  const firstBrace = stripped.indexOf("{");
-  const lastBrace = stripped.lastIndexOf("}");
-  if (firstBrace >= 0) {
-    candidates.push(lastBrace > firstBrace ? stripped.slice(firstBrace, lastBrace + 1) : stripped.slice(firstBrace));
-  }
+  const tagMatch = stripped.match(/<(?:lumi-stats|lumi_stats|lumi-tracker|worldweave|tracker)\b[^>]*>([\s\S]*?)(?:<\/(?:lumi-stats|lumi_stats|lumi-tracker|worldweave|tracker)>|$)/i);
+  pushWithBraceSlice(candidates, tagMatch?.[1]);
+  const fenceMatch = stripped.match(/```(?:json|lumi-stats|lumi_stats|lumi-tracker|tracker|sim)?\s*([\s\S]*?)\s*```/i);
+  pushWithBraceSlice(candidates, fenceMatch?.[1]);
+  pushWithBraceSlice(candidates, stripped);
   let lastErr;
   for (const cand of candidates) {
-    const cleanCand = scrubUnicodeSpacesForJson(cand);
-    const preserveSignedPlus = cleanCand.replace(/(:\s*)\+(\d+(?:\.\d+)?)(?=\s*[,}\]\r\n])/g, '$1"+$2"');
+    const cleanCand = sanitizeJsonControlCharsAndComments(scrubUnicodeSpacesForJson(cand));
+    const preserveSignedPlus = cleanCand.replace(/(:\s*)\+\s*(\d+(?:\.\d+)?)(?=\s*[,}\]\r\n])/g, '$1"+$2"');
     const removeTrailingCommas = preserveSignedPlus.replace(/("(?:\\.|[^"\\])*")|,(\s*[}\]])/g, (_m, quoted, closing) => quoted ? quoted : closing);
     for (const attempt of [
       cleanCand,
@@ -5788,6 +5853,9 @@ class TrackerEngine {
   emitToUser;
   inFlight = new Map;
   processedTurnKeys = new Set;
+  stagedInlineTags = new Map;
+  activeTrackTargets = new Map;
+  recentTrackedTargets = new Map;
   debugRecords = new Map;
   proposals = new Map;
   constructor(api, storage, emitToUser) {
@@ -5800,6 +5868,15 @@ class TrackerEngine {
   }
   isBusy(userId, chatId) {
     return this.inFlight.has(this.jobKey(userId, chatId));
+  }
+  isTrackingMessage(userId, chatId, messageId) {
+    if (!messageId)
+      return false;
+    const key = this.jobKey(userId, chatId);
+    if (this.activeTrackTargets.get(key) === messageId)
+      return true;
+    const recent = this.recentTrackedTargets.get(key);
+    return Boolean(recent && recent.messageId === messageId && Date.now() - recent.at < 2000);
   }
   cancelInFlight(userId, chatId) {
     const key = this.jobKey(userId, chatId);
@@ -5914,178 +5991,213 @@ IMPORTANT: Output ONLY a single valid JSON object. Do not wrap in conversational
     }
   }
   async trackTurn(userId, chatId, options = {}) {
-    if (!options.manual && this.isBusy(userId, chatId))
-      return null;
+    const jobKey = this.jobKey(userId, chatId);
+    const stageKey = options.targetMessageId ? `${jobKey}:${options.targetMessageId}` : "";
+    if (stageKey && options.inlineTagContent) {
+      if (this.stagedInlineTags.size >= 40) {
+        const oldest = this.stagedInlineTags.keys().next().value;
+        if (oldest !== undefined)
+          this.stagedInlineTags.delete(oldest);
+      }
+      this.stagedInlineTags.set(stageKey, options.inlineTagContent);
+    }
+    if (options.targetMessageId) {
+      this.activeTrackTargets.set(jobKey, options.targetMessageId);
+    }
     return this.storage.queue(userId, chatId, async () => {
-      let allMessages = await this.readTranscript(chatId);
-      if (!allMessages.length)
-        return null;
-      let targetIdx = options.targetMessageId ? allMessages.findIndex((m) => m.id === options.targetMessageId) : -1;
-      if (targetIdx < 0 && options.targetMessageId) {
-        await new Promise((r) => setTimeout(r, 200));
-        allMessages = await this.readTranscript(chatId);
-        targetIdx = allMessages.findIndex((m) => m.id === options.targetMessageId);
-      }
-      if (targetIdx < 0) {
-        targetIdx = allMessages.findLastIndex((m) => m.role === "assistant" && m.content.trim().length > 0);
-        if (targetIdx < 0)
-          targetIdx = allMessages.length - 1;
-      }
-      const targetMsg = allMessages[targetIdx];
-      if (!targetMsg || targetMsg.role === "system")
-        return null;
-      const binding = await this.buildBinding(targetMsg, targetIdx);
-      const idempotencyKey = `${chatId}:${binding.messageId}:${binding.swipeId}:${binding.contentHash}`;
-      if (!options.manual && this.processedTurnKeys.has(idempotencyKey)) {
-        return null;
-      }
-      let snapshot = await this.storage.loadCampaign(userId, chatId);
-      if (!options.manual && snapshot.bindings.some((b) => b.messageId === binding.messageId && b.swipeId === binding.swipeId && b.contentHash === binding.contentHash)) {
-        this.processedTurnKeys.add(idempotencyKey);
-        return null;
-      }
-      const validIds = new Set(allMessages.map((m) => m.id));
-      const lastBinding = snapshot.bindings.at(-1);
-      const needsRollback = snapshot.bindings.some((b) => b.messageId === binding.messageId || b.messageIndex >= binding.messageIndex) || Boolean(lastBinding && !validIds.has(lastBinding.messageId));
-      if (needsRollback) {
-        const rolled = await this.storage.rollbackBeforeMessage(userId, chatId, {
-          targetMessageId: binding.messageId,
-          targetIndex: binding.messageIndex,
-          validMessageIds: validIds
-        });
-        if (rolled)
-          snapshot = rolled;
-      }
-      const settings = await this.storage.loadSettings(userId);
-      const template = snapshot.template;
-      let patch = null;
-      if (options.inlineTagContent) {
-        try {
-          patch = parseExtractedJson(options.inlineTagContent);
-        } catch (err) {
-          this.api.log.warn(`Malformed inline <lumi-stats> tag; falling back to sidecar extraction: ${err instanceof Error ? err.message : String(err)}`);
-          patch = null;
+      try {
+        let allMessages = await this.readTranscript(chatId);
+        if (!allMessages.length)
+          return null;
+        let targetIdx = options.targetMessageId ? allMessages.findIndex((m) => m.id === options.targetMessageId) : -1;
+        if (targetIdx < 0 && options.targetMessageId) {
+          for (const waitMs of [150, 300, 500]) {
+            await new Promise((r) => setTimeout(r, waitMs));
+            allMessages = await this.readTranscript(chatId);
+            targetIdx = allMessages.findIndex((m) => m.id === options.targetMessageId);
+            if (targetIdx >= 0)
+              break;
+          }
+          if (targetIdx < 0)
+            return null;
         }
-      }
-      if (!patch) {
-        patch = extractInlineStatsTag(targetMsg.content);
-      }
-      let rawDebugText = options.inlineTagContent || "";
-      if (!patch && this.api.permissions.has("generation")) {
-        const useCompactGrounding = snapshot.state.initialized && snapshot.state.turnCount >= 2;
-        const grounding = useCompactGrounding ? {} : await readAuthoritativeGrounding(this.api, userId, chatId, { compact: false });
-        const historyTurns = Math.max(2, Math.min(12, Math.round(settings.sidecarHistoryTurns ?? 4)));
-        const maxMsgChars = Math.max(800, Math.min(6000, Math.round(settings.sidecarMaxCharsPerMsg ?? 2500)));
-        const recentTranscript = allMessages.slice(Math.max(0, targetIdx - (historyTurns - 1)), targetIdx + 1).map((m) => ({
-          id: m.id,
-          role: m.role,
-          content: stripInlineStatsTags(m.content).slice(0, maxMsgChars)
-        }));
-        const recentJoinedText = recentTranscript.map((m) => m.content).join(`
-`);
-        const leanCurrentState = buildLeanSidecarStateSnapshot(snapshot.state, template, recentJoinedText);
-        const obfEnabled = Boolean(settings.sensitiveObfuscatorEnabled) && settings.obfuscateOnSend !== false && (settings.sensitiveWords?.length ?? 0) > 0;
-        const obfWords = settings.sensitiveWords ?? [];
-        const useOne = settings.obfuscateVowelsWithOne !== false;
-        const obfText = (txt) => txt && obfEnabled ? obfuscateSensitiveWords(txt, obfWords, useOne) : txt;
-        const safeCard = grounding.characterCard ? {
-          name: grounding.characterCard.name,
-          description: obfText(grounding.characterCard.description) ?? "",
-          personality: obfText(grounding.characterCard.personality) ?? "",
-          scenario: obfText(grounding.characterCard.scenario) ?? "",
-          ...grounding.characterCard.firstMessage ? { firstMessage: obfText(grounding.characterCard.firstMessage) } : {}
-        } : undefined;
-        const safePersona = grounding.persona ? {
-          name: grounding.persona.name,
-          description: obfText(grounding.persona.description) ?? ""
-        } : undefined;
-        const safeTranscript = recentTranscript.map((m) => ({
-          ...m,
-          content: obfText(m.content) ?? m.content
-        }));
-        const sysPrompt = compileExtractorPrompt(snapshot.state, template, recentJoinedText, {
-          verbosity: settings.protocolVerbosity ?? "compact"
-        });
-        const canonSetupAndCardGrounding = {};
-        if (snapshot.state.canonPremise) {
-          canonSetupAndCardGrounding.canonPremise = obfText(snapshot.state.canonPremise);
+        if (targetIdx < 0) {
+          targetIdx = allMessages.findLastIndex((m) => m.role === "assistant" && m.content.trim().length > 0);
+          if (targetIdx < 0)
+            targetIdx = allMessages.length - 1;
         }
-        if (safeCard)
-          canonSetupAndCardGrounding.characterCard = safeCard;
-        if (safePersona)
-          canonSetupAndCardGrounding.activePersona = safePersona;
-        if (grounding.openingUserMessage) {
-          canonSetupAndCardGrounding.openingUserMessage = obfText(grounding.openingUserMessage);
-        }
-        const { parsed, rawText } = await this.invokeStructuredModel(userId, chatId, "extractor", sysPrompt, {
-          ...Object.keys(canonSetupAndCardGrounding).length ? { canonSetupAndCardGrounding } : {},
-          currentState: leanCurrentState,
-          recentMessagesToEvaluate: safeTranscript
-        });
-        patch = parsed;
-        rawDebugText = rawText;
-      }
-      if (!patch)
-        return null;
-      const latestAll = await this.readTranscript(chatId);
-      const latestIdx = latestAll.findIndex((m) => m.id === targetMsg.id);
-      const latestTarget = latestIdx >= 0 ? latestAll[latestIdx] : undefined;
-      if (latestTarget) {
-        const latestBinding = await this.buildBinding(latestTarget, latestIdx);
-        if (latestBinding.swipeId !== binding.swipeId || latestBinding.contentHash !== binding.contentHash) {
+        const targetMsg = allMessages[targetIdx];
+        if (!targetMsg || targetMsg.role === "system")
+          return null;
+        let binding = await this.buildBinding(targetMsg, targetIdx);
+        const idempotencyKey = `${chatId}:${binding.messageId}:${binding.swipeId}:${binding.contentHash}`;
+        if (!options.manual && this.processedTurnKeys.has(idempotencyKey)) {
           return null;
         }
-      }
-      const reduced = applyTurnPatch(snapshot.state, template, patch, {
-        incrementTurn: targetMsg.role === "assistant",
-        ...settings.sensitiveObfuscatorEnabled && (settings.sensitiveWords?.length ?? 0) > 0 ? {
-          obfuscationConfig: {
-            words: settings.sensitiveWords,
-            useOne: settings.obfuscateVowelsWithOne !== false
-          }
-        } : {}
-      });
-      await this.linkCardPortraitIfAvailable(userId, chatId, reduced.state);
-      this.processedTurnKeys.add(idempotencyKey);
-      if (this.processedTurnKeys.size > 400) {
-        const oldest = this.processedTurnKeys.values().next().value;
-        if (oldest)
-          this.processedTurnKeys.delete(oldest);
-      }
-      const committed = await this.storage.commitCampaign(userId, chatId, snapshot.state, reduced.state, snapshot.state.initialized ? "Tracked story turn" : "Calibrated initial world & character stats", binding);
-      if (settings.debugInspector) {
-        const dbgKey = this.jobKey(userId, chatId);
-        if (!this.debugRecords.has(dbgKey) && this.debugRecords.size >= 30) {
-          const oldestDbg = this.debugRecords.keys().next().value;
-          if (oldestDbg !== undefined)
-            this.debugRecords.delete(oldestDbg);
+        let snapshot = await this.storage.loadCampaign(userId, chatId);
+        if (!options.manual && snapshot.bindings.some((b) => b.messageId === binding.messageId && b.swipeId === binding.swipeId && b.contentHash === binding.contentHash)) {
+          this.processedTurnKeys.add(idempotencyKey);
+          return null;
         }
-        this.debugRecords.set(dbgKey, {
-          at: new Date().toISOString(),
-          messageId: targetMsg.id,
-          rawOutput: rawDebugText.slice(0, 32000),
-          parsedPatch: patch,
-          appliedDeltas: reduced.deltas
+        const validIds = new Set(allMessages.map((m) => m.id));
+        const lastBinding = snapshot.bindings.at(-1);
+        const needsRollback = snapshot.bindings.some((b) => b.messageId === binding.messageId || b.messageIndex >= binding.messageIndex) || Boolean(lastBinding && !validIds.has(lastBinding.messageId));
+        if (needsRollback) {
+          const rolled = await this.storage.rollbackBeforeMessage(userId, chatId, {
+            targetMessageId: binding.messageId,
+            targetIndex: binding.messageIndex,
+            validMessageIds: validIds
+          });
+          if (rolled)
+            snapshot = rolled;
+        }
+        const settings = await this.storage.loadSettings(userId);
+        const template = snapshot.template;
+        const inlineCandidate = options.inlineTagContent || (stageKey ? this.stagedInlineTags.get(stageKey) : undefined);
+        let patch = null;
+        if (inlineCandidate) {
+          try {
+            patch = parseExtractedJson(inlineCandidate);
+          } catch (err) {
+            this.api.log.warn(`Malformed inline <lumi-stats> tag; falling back to sidecar extraction: ${err instanceof Error ? err.message : String(err)}`);
+            patch = null;
+          }
+        }
+        if (!patch) {
+          patch = extractInlineStatsTag(targetMsg.content);
+        }
+        let rawDebugText = inlineCandidate || "";
+        if (!patch && this.api.permissions.has("generation")) {
+          const useCompactGrounding = snapshot.state.initialized && snapshot.state.turnCount >= 2;
+          const grounding = useCompactGrounding ? {} : await readAuthoritativeGrounding(this.api, userId, chatId, { compact: false });
+          const historyTurns = Math.max(2, Math.min(12, Math.round(settings.sidecarHistoryTurns ?? 4)));
+          const maxMsgChars = Math.max(800, Math.min(6000, Math.round(settings.sidecarMaxCharsPerMsg ?? 2500)));
+          const recentTranscript = allMessages.slice(Math.max(0, targetIdx - (historyTurns - 1)), targetIdx + 1).map((m) => ({
+            id: m.id,
+            role: m.role,
+            content: stripInlineStatsTags(m.content).slice(0, maxMsgChars)
+          }));
+          const recentJoinedText = recentTranscript.map((m) => m.content).join(`
+`);
+          const leanCurrentState = buildLeanSidecarStateSnapshot(snapshot.state, template, recentJoinedText);
+          const obfEnabled = Boolean(settings.sensitiveObfuscatorEnabled) && settings.obfuscateOnSend !== false && (settings.sensitiveWords?.length ?? 0) > 0;
+          const obfWords = settings.sensitiveWords ?? [];
+          const useOne = settings.obfuscateVowelsWithOne !== false;
+          const obfText = (txt) => txt && obfEnabled ? obfuscateSensitiveWords(txt, obfWords, useOne) : txt;
+          const safeCard = grounding.characterCard ? {
+            name: grounding.characterCard.name,
+            description: obfText(grounding.characterCard.description) ?? "",
+            personality: obfText(grounding.characterCard.personality) ?? "",
+            scenario: obfText(grounding.characterCard.scenario) ?? "",
+            ...grounding.characterCard.firstMessage ? { firstMessage: obfText(grounding.characterCard.firstMessage) } : {}
+          } : undefined;
+          const safePersona = grounding.persona ? {
+            name: grounding.persona.name,
+            description: obfText(grounding.persona.description) ?? ""
+          } : undefined;
+          const safeTranscript = recentTranscript.map((m) => ({
+            ...m,
+            content: obfText(m.content) ?? m.content
+          }));
+          const sysPrompt = compileExtractorPrompt(snapshot.state, template, recentJoinedText, {
+            verbosity: settings.protocolVerbosity ?? "compact"
+          });
+          const canonSetupAndCardGrounding = {};
+          if (snapshot.state.canonPremise) {
+            canonSetupAndCardGrounding.canonPremise = obfText(snapshot.state.canonPremise);
+          }
+          if (safeCard)
+            canonSetupAndCardGrounding.characterCard = safeCard;
+          if (safePersona)
+            canonSetupAndCardGrounding.activePersona = safePersona;
+          if (grounding.openingUserMessage) {
+            canonSetupAndCardGrounding.openingUserMessage = obfText(grounding.openingUserMessage);
+          }
+          const { parsed, rawText } = await this.invokeStructuredModel(userId, chatId, "extractor", sysPrompt, {
+            ...Object.keys(canonSetupAndCardGrounding).length ? { canonSetupAndCardGrounding } : {},
+            currentState: leanCurrentState,
+            recentMessagesToEvaluate: safeTranscript
+          });
+          patch = parsed;
+          rawDebugText = rawText;
+        }
+        if (!patch)
+          return null;
+        const latestAll = await this.readTranscript(chatId);
+        const latestIdx = latestAll.findIndex((m) => m.id === targetMsg.id);
+        if (latestIdx < 0)
+          return null;
+        const latestTarget = latestAll[latestIdx];
+        if (latestTarget) {
+          const latestBinding = await this.buildBinding(latestTarget, latestIdx);
+          if (latestBinding.swipeId !== binding.swipeId) {
+            return null;
+          }
+          binding = latestBinding;
+        }
+        const reduced = applyTurnPatch(snapshot.state, template, patch, {
+          incrementTurn: targetMsg.role === "assistant",
+          ...settings.sensitiveObfuscatorEnabled && (settings.sensitiveWords?.length ?? 0) > 0 ? {
+            obfuscationConfig: {
+              words: settings.sensitiveWords,
+              useOne: settings.obfuscateVowelsWithOne !== false
+            }
+          } : {}
         });
-      }
-      if (settings.thresholdToasts && reduced.triggeredAlerts.length > 0) {
-        for (const alertMsg of reduced.triggeredAlerts.slice(0, 3)) {
-          this.api.toast.info(alertMsg, {
-            title: "Stat Threshold Reached",
-            ...userId ? { userId } : {}
+        await this.linkCardPortraitIfAvailable(userId, chatId, reduced.state);
+        const finalIdempotencyKey = `${chatId}:${binding.messageId}:${binding.swipeId}:${binding.contentHash}`;
+        this.processedTurnKeys.add(idempotencyKey);
+        this.processedTurnKeys.add(finalIdempotencyKey);
+        if (this.processedTurnKeys.size > 400) {
+          const oldest = this.processedTurnKeys.values().next().value;
+          if (oldest)
+            this.processedTurnKeys.delete(oldest);
+        }
+        const committed = await this.storage.commitCampaign(userId, chatId, snapshot.state, reduced.state, snapshot.state.initialized ? "Tracked story turn" : "Calibrated initial world & character stats", binding);
+        if (settings.debugInspector) {
+          const dbgKey = this.jobKey(userId, chatId);
+          if (!this.debugRecords.has(dbgKey) && this.debugRecords.size >= 30) {
+            const oldestDbg = this.debugRecords.keys().next().value;
+            if (oldestDbg !== undefined)
+              this.debugRecords.delete(oldestDbg);
+          }
+          this.debugRecords.set(dbgKey, {
+            at: new Date().toISOString(),
+            messageId: targetMsg.id,
+            rawOutput: rawDebugText.slice(0, 32000),
+            parsedPatch: patch,
+            appliedDeltas: reduced.deltas
           });
         }
+        if (settings.thresholdToasts && reduced.triggeredAlerts.length > 0) {
+          for (const alertMsg of reduced.triggeredAlerts.slice(0, 3)) {
+            this.api.toast.info(alertMsg, {
+              title: "Stat Threshold Reached",
+              ...userId ? { userId } : {}
+            });
+          }
+        }
+        if (settings.memoryCortexSync) {
+          syncStateToMemoryCortex(this.api, userId, chatId, reduced.state, template, {
+            touchedCharacterIds: reduced.touchedCharacterIds,
+            touchedPlaceIds: reduced.touchedPlaceIds
+          });
+        }
+        this.recentTrackedTargets.set(jobKey, { messageId: targetMsg.id, at: Date.now() });
+        return committed;
+      } finally {
+        if (stageKey)
+          this.stagedInlineTags.delete(stageKey);
+        if (options.targetMessageId && this.activeTrackTargets.get(jobKey) === options.targetMessageId) {
+          this.activeTrackTargets.delete(jobKey);
+        }
       }
-      if (settings.memoryCortexSync) {
-        syncStateToMemoryCortex(this.api, userId, chatId, reduced.state, template, {
-          touchedCharacterIds: reduced.touchedCharacterIds,
-          touchedPlaceIds: reduced.touchedPlaceIds
-        });
-      }
-      return committed;
     });
   }
   async reconcileMessageChange(userId, chatId, changedMessageId) {
+    if (this.isTrackingMessage(userId, chatId, changedMessageId)) {
+      return null;
+    }
     this.cancelInFlight(userId, chatId);
     return this.storage.queue(userId, chatId, async () => {
       const snapshot = await this.storage.loadCampaign(userId, chatId);
@@ -6674,9 +6786,17 @@ class LumiStatsService {
           targetMessageId: messageId,
           inlineTagContent: rawContent
         });
-        if (snap)
+        if (snap) {
           await this.broadcastSnapshot(userId, chatId, session);
-        return { ok: Boolean(snap) };
+          return { ok: true };
+        }
+        if (messageId) {
+          const current = await this.storage.loadCampaign(userId, chatId, { skipChatVarReconcile: true });
+          if (current.bindings.some((b) => b.messageId === messageId)) {
+            return { ok: true, alreadyTracked: true };
+          }
+        }
+        return { ok: false };
       }
       case "settings:update": {
         const nextSettings = await this.storage.saveSettings(userId, payload.settings ?? {});
@@ -7977,10 +8097,28 @@ ${compileExtractorPrompt(state, template, "", { verbosity })}`;
       }));
       disposeGenEvents.push(this.api.on("GENERATION_STOPPED", (p, userId) => {
         const chatId = getChatId(p);
-        if (chatId) {
-          const resolvedUser = this.resolveUserId(userId, chatId);
-          this.activeGenerations.delete(`${resolvedUser ?? "__owner__"}:${chatId}`);
-        }
+        if (!chatId)
+          return;
+        const resolvedUser = this.resolveUserId(userId, chatId);
+        this.activeGenerations.delete(`${resolvedUser ?? "__owner__"}:${chatId}`);
+        const ev = p ?? {};
+        const partialContent = typeof ev.content === "string" ? ev.content : "";
+        if (!partialContent || !extractInlineStatsTag(partialContent))
+          return;
+        const msgId = getMsgId(p);
+        (async () => {
+          const settings = await this.storage.loadSettings(resolvedUser);
+          if (!settings.autoTrack)
+            return;
+          const snap = await this.tracker.trackTurn(resolvedUser, chatId, {
+            targetMessageId: msgId || undefined,
+            inlineTagContent: partialContent
+          });
+          if (snap)
+            await this.broadcastSnapshot(resolvedUser, chatId);
+        })().catch(() => {
+          return;
+        });
       }));
     };
     syncGenerationSubscriptions();
@@ -8010,6 +8148,9 @@ ${compileExtractorPrompt(state, template, "", { verbosity })}`;
         }
         const resolvedUser = this.resolveUserId(userId, chatId);
         if (this.activeGenerations.has(`${resolvedUser ?? "__owner__"}:${chatId}`) && evName !== "MESSAGE_DELETED") {
+          return;
+        }
+        if (evName !== "MESSAGE_DELETED" && this.tracker.isTrackingMessage(resolvedUser, chatId, msgId || undefined)) {
           return;
         }
         this.tracker.reconcileMessageChange(resolvedUser, chatId, msgId || undefined).then((snap) => {

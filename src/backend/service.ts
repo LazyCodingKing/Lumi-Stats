@@ -506,8 +506,17 @@ export class LumiStatsService {
           targetMessageId: messageId,
           inlineTagContent: rawContent,
         });
-        if (snap) await this.broadcastSnapshot(userId, chatId, session);
-        return { ok: Boolean(snap) };
+        if (snap) {
+          await this.broadcastSnapshot(userId, chatId, session);
+          return { ok: true };
+        }
+        if (messageId) {
+          const current = await this.storage.loadCampaign(userId, chatId, { skipChatVarReconcile: true });
+          if (current.bindings.some(b => b.messageId === messageId)) {
+            return { ok: true, alreadyTracked: true };
+          }
+        }
+        return { ok: false };
       }
 
       case 'settings:update': {
@@ -2219,10 +2228,22 @@ export class LumiStatsService {
       disposeGenEvents.push(
         this.api.on('GENERATION_STOPPED', (p, userId) => {
           const chatId = getChatId(p);
-          if (chatId) {
-            const resolvedUser = this.resolveUserId(userId, chatId);
-            this.activeGenerations.delete(`${resolvedUser ?? '__owner__'}:${chatId}`);
-          }
+          if (!chatId) return;
+          const resolvedUser = this.resolveUserId(userId, chatId);
+          this.activeGenerations.delete(`${resolvedUser ?? '__owner__'}:${chatId}`);
+          const ev = (p ?? {}) as unknown as Record<string, unknown>;
+          const partialContent = typeof ev.content === 'string' ? ev.content : '';
+          if (!partialContent || !extractInlineStatsTag(partialContent)) return;
+          const msgId = getMsgId(p);
+          void (async () => {
+            const settings = await this.storage.loadSettings(resolvedUser);
+            if (!settings.autoTrack) return;
+            const snap = await this.tracker.trackTurn(resolvedUser, chatId, {
+              targetMessageId: msgId || undefined,
+              inlineTagContent: partialContent,
+            });
+            if (snap) await this.broadcastSnapshot(resolvedUser, chatId);
+          })().catch(() => undefined);
         }),
       );
     };
@@ -2258,6 +2279,9 @@ export class LumiStatsService {
           }
           const resolvedUser = this.resolveUserId(userId, chatId);
           if (this.activeGenerations.has(`${resolvedUser ?? '__owner__'}:${chatId}`) && evName !== 'MESSAGE_DELETED') {
+            return;
+          }
+          if (evName !== 'MESSAGE_DELETED' && this.tracker.isTrackingMessage(resolvedUser, chatId, msgId || undefined)) {
             return;
           }
           void this.tracker

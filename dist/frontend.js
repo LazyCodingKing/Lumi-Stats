@@ -18964,6 +18964,60 @@ function mountLumiStats(ctx) {
       ctrl.isGenerationStreaming = true;
     }
   }));
+  const seenInterceptSigs = new Set;
+  const inFlightInterceptSigs = new Set;
+  let pendingTagRetry = null;
+  let pendingRetryTimer = null;
+  cleanup.push(() => {
+    if (pendingRetryTimer) {
+      clearTimeout(pendingRetryTimer);
+      pendingRetryTimer = null;
+    }
+  });
+  const dispatchTagIntercept = (item) => {
+    if (seenInterceptSigs.has(item.sig) || inFlightInterceptSigs.has(item.sig))
+      return;
+    if (ctrl.hydratingChat) {
+      pendingTagRetry = item;
+      return;
+    }
+    const latestId = ctx.messages?.getLatestMessageId?.() ?? null;
+    if (!latestId || item.messageId !== latestId) {
+      pendingTagRetry = item;
+      return;
+    }
+    inFlightInterceptSigs.add(item.sig);
+    ctrl.request("tag:intercepted", {
+      messageId: item.messageId,
+      content: item.content
+    }).then((res) => {
+      if (res?.ok === true) {
+        if (seenInterceptSigs.size >= 60) {
+          const oldest = seenInterceptSigs.values().next().value;
+          if (oldest !== undefined)
+            seenInterceptSigs.delete(oldest);
+        }
+        seenInterceptSigs.add(item.sig);
+        if (pendingTagRetry?.sig === item.sig)
+          pendingTagRetry = null;
+      } else if (item.attempts < 3) {
+        pendingTagRetry = { ...item, attempts: item.attempts + 1 };
+        if (pendingRetryTimer)
+          clearTimeout(pendingRetryTimer);
+        pendingRetryTimer = setTimeout(() => {
+          pendingRetryTimer = null;
+          if (pendingTagRetry)
+            dispatchTagIntercept(pendingTagRetry);
+        }, 400);
+      }
+    }).catch(() => {
+      if (item.attempts < 3) {
+        pendingTagRetry = { ...item, attempts: item.attempts + 1 };
+      }
+    }).finally(() => {
+      inFlightInterceptSigs.delete(item.sig);
+    });
+  };
   for (const endEvent of ["GENERATION_ENDED", "GENERATION_STOPPED"]) {
     cleanup.push(ctx.events.on(endEvent, (payload) => {
       const obj = payload && typeof payload === "object" ? payload : {};
@@ -18971,6 +19025,9 @@ function mountLumiStats(ctx) {
       if (!ctrl.isActivityForActiveChat(msgChatId))
         return;
       ctrl.isGenerationStreaming = false;
+      if (pendingTagRetry && ctrl.isActivityForActiveChat(pendingTagRetry.chatId)) {
+        dispatchTagIntercept(pendingTagRetry);
+      }
       if (ctrl.vnStageOpen) {
         ctrl.refreshActiveChat(ctrl.chatId);
       }
@@ -18982,10 +19039,12 @@ function mountLumiStats(ctx) {
     const msgChatId = typeof obj.chatId === "string" ? obj.chatId : null;
     if (!ctrl.isActivityForActiveChat(msgChatId) || ctrl.isGenerationStreaming)
       return;
+    if (pendingTagRetry && ctrl.isActivityForActiveChat(pendingTagRetry.chatId)) {
+      dispatchTagIntercept(pendingTagRetry);
+    }
     inlineManager.sync((actorId) => openCharacterDossierModal(ctrl, actorId), openStudio);
   }));
   if (ctx.messages?.registerTagInterceptor) {
-    const seenInterceptSigs = new Set;
     for (const tagName of ["lumi-stats", "lumi_stats", "lumi-tracker", "worldweave", "tracker"]) {
       cleanup.push(ctx.messages.registerTagInterceptor({ tagName, removeFromMessage: true }, (payload) => {
         if (payload.isStreaming)
@@ -18993,10 +19052,7 @@ function mountLumiStats(ctx) {
         const payloadChatId = payload.chatId || null;
         if (!ctrl.isActivityForActiveChat(payloadChatId))
           return;
-        if (ctrl.hydratingChat)
-          return;
-        const latestId = ctx.messages.getLatestMessageId();
-        if (!payload.messageId || !latestId || payload.messageId !== latestId)
+        if (!payload.messageId)
           return;
         const content = typeof payload.content === "string" ? payload.content.trim() : "";
         if (!content)
@@ -19004,15 +19060,12 @@ function mountLumiStats(ctx) {
         const sig = `${payloadChatId ?? ctrl.chatId}:${payload.messageId}:${fnv1a32(content)}`;
         if (seenInterceptSigs.has(sig))
           return;
-        if (seenInterceptSigs.size >= 60) {
-          const oldest = seenInterceptSigs.values().next().value;
-          if (oldest !== undefined)
-            seenInterceptSigs.delete(oldest);
-        }
-        seenInterceptSigs.add(sig);
-        ctrl.request("tag:intercepted", {
+        dispatchTagIntercept({
+          chatId: payloadChatId,
           messageId: payload.messageId,
-          content
+          content,
+          sig,
+          attempts: 0
         });
       }));
     }

@@ -59,6 +59,9 @@ function sanitizeModelName(value: unknown): string | undefined {
 export class TrackerEngine {
   private inFlight = new Map<string, AbortController>();
   private processedTurnKeys = new Set<string>();
+  private stagedInlineTags = new Map<string, string>();
+  private activeTrackTargets = new Map<string, string>();
+  private recentTrackedTargets = new Map<string, { messageId: string; at: number }>();
   private debugRecords = new Map<string, Record<string, unknown>>();
   private proposals = new Map<string, CopilotProposalRecord>();
 
@@ -78,6 +81,14 @@ export class TrackerEngine {
 
   isBusy(userId: string | undefined, chatId: string): boolean {
     return this.inFlight.has(this.jobKey(userId, chatId));
+  }
+
+  isTrackingMessage(userId: string | undefined, chatId: string, messageId?: string): boolean {
+    if (!messageId) return false;
+    const key = this.jobKey(userId, chatId);
+    if (this.activeTrackTargets.get(key) === messageId) return true;
+    const recent = this.recentTrackedTargets.get(key);
+    return Boolean(recent && recent.messageId === messageId && Date.now() - recent.at < 2000);
   }
 
   cancelInFlight(userId: string | undefined, chatId: string): void {
@@ -225,46 +236,62 @@ export class TrackerEngine {
     chatId: string,
     options: { targetMessageId?: string; inlineTagContent?: string; manual?: boolean } = {},
   ): Promise<CampaignSnapshot | null> {
-    if (!options.manual && this.isBusy(userId, chatId)) return null;
+    const jobKey = this.jobKey(userId, chatId);
+    const stageKey = options.targetMessageId ? `${jobKey}:${options.targetMessageId}` : '';
+    if (stageKey && options.inlineTagContent) {
+      if (this.stagedInlineTags.size >= 40) {
+        const oldest = this.stagedInlineTags.keys().next().value;
+        if (oldest !== undefined) this.stagedInlineTags.delete(oldest);
+      }
+      this.stagedInlineTags.set(stageKey, options.inlineTagContent);
+    }
+    if (options.targetMessageId) {
+      this.activeTrackTargets.set(jobKey, options.targetMessageId);
+    }
 
     return this.storage.queue(userId, chatId, async () => {
-      let allMessages = await this.readTranscript(chatId);
-      if (!allMessages.length) return null;
+      try {
+        let allMessages = await this.readTranscript(chatId);
+        if (!allMessages.length) return null;
 
-      let targetIdx = options.targetMessageId
-        ? allMessages.findIndex(m => m.id === options.targetMessageId)
-        : -1;
-      if (targetIdx < 0 && options.targetMessageId) {
-        await new Promise(r => setTimeout(r, 200));
-        allMessages = await this.readTranscript(chatId);
-        targetIdx = allMessages.findIndex(m => m.id === options.targetMessageId);
-      }
-      if (targetIdx < 0) {
-        targetIdx = allMessages.findLastIndex(m => m.role === 'assistant' && m.content.trim().length > 0);
-        if (targetIdx < 0) targetIdx = allMessages.length - 1;
-      }
-      const targetMsg = allMessages[targetIdx];
-      if (!targetMsg || targetMsg.role === 'system') return null;
+        let targetIdx = options.targetMessageId
+          ? allMessages.findIndex(m => m.id === options.targetMessageId)
+          : -1;
+        if (targetIdx < 0 && options.targetMessageId) {
+          for (const waitMs of [150, 300, 500]) {
+            await new Promise(r => setTimeout(r, waitMs));
+            allMessages = await this.readTranscript(chatId);
+            targetIdx = allMessages.findIndex(m => m.id === options.targetMessageId);
+            if (targetIdx >= 0) break;
+          }
+          if (targetIdx < 0) return null;
+        }
+        if (targetIdx < 0) {
+          targetIdx = allMessages.findLastIndex(m => m.role === 'assistant' && m.content.trim().length > 0);
+          if (targetIdx < 0) targetIdx = allMessages.length - 1;
+        }
+        const targetMsg = allMessages[targetIdx];
+        if (!targetMsg || targetMsg.role === 'system') return null;
 
-      const binding = await this.buildBinding(targetMsg, targetIdx);
-      const idempotencyKey = `${chatId}:${binding.messageId}:${binding.swipeId}:${binding.contentHash}`;
-      if (!options.manual && this.processedTurnKeys.has(idempotencyKey)) {
-        return null;
-      }
+        let binding = await this.buildBinding(targetMsg, targetIdx);
+        const idempotencyKey = `${chatId}:${binding.messageId}:${binding.swipeId}:${binding.contentHash}`;
+        if (!options.manual && this.processedTurnKeys.has(idempotencyKey)) {
+          return null;
+        }
 
-      let snapshot = await this.storage.loadCampaign(userId, chatId);
-      if (
-        !options.manual &&
-        snapshot.bindings.some(
-          b =>
-            b.messageId === binding.messageId &&
-            b.swipeId === binding.swipeId &&
-            b.contentHash === binding.contentHash,
-        )
-      ) {
-        this.processedTurnKeys.add(idempotencyKey);
-        return null;
-      }
+        let snapshot = await this.storage.loadCampaign(userId, chatId);
+        if (
+          !options.manual &&
+          snapshot.bindings.some(
+            b =>
+              b.messageId === binding.messageId &&
+              b.swipeId === binding.swipeId &&
+              b.contentHash === binding.contentHash,
+          )
+        ) {
+          this.processedTurnKeys.add(idempotencyKey);
+          return null;
+        }
 
       const validIds = new Set(allMessages.map(m => m.id));
       const lastBinding = snapshot.bindings.at(-1);
@@ -285,10 +312,12 @@ export class TrackerEngine {
       const settings = await this.storage.loadSettings(userId);
       const template = snapshot.template;
 
+      const inlineCandidate =
+        options.inlineTagContent || (stageKey ? this.stagedInlineTags.get(stageKey) : undefined);
       let patch: ExtractedTurnPatch | null = null;
-      if (options.inlineTagContent) {
+      if (inlineCandidate) {
         try {
-          patch = parseExtractedJson(options.inlineTagContent);
+          patch = parseExtractedJson(inlineCandidate);
         } catch (err) {
           this.api.log.warn(
             `Malformed inline <lumi-stats> tag; falling back to sidecar extraction: ${err instanceof Error ? err.message : String(err)}`,
@@ -299,7 +328,7 @@ export class TrackerEngine {
       if (!patch) {
         patch = extractInlineStatsTag(targetMsg.content);
       }
-      let rawDebugText = options.inlineTagContent || '';
+      let rawDebugText = inlineCandidate || '';
 
       if (!patch && this.api.permissions.has('generation')) {
         const useCompactGrounding = snapshot.state.initialized && snapshot.state.turnCount >= 2;
@@ -387,15 +416,14 @@ export class TrackerEngine {
 
       const latestAll = await this.readTranscript(chatId);
       const latestIdx = latestAll.findIndex(m => m.id === targetMsg.id);
-      const latestTarget = latestIdx >= 0 ? latestAll[latestIdx] : undefined;
+      if (latestIdx < 0) return null;
+      const latestTarget = latestAll[latestIdx];
       if (latestTarget) {
         const latestBinding = await this.buildBinding(latestTarget, latestIdx);
-        if (
-          latestBinding.swipeId !== binding.swipeId ||
-          latestBinding.contentHash !== binding.contentHash
-        ) {
+        if (latestBinding.swipeId !== binding.swipeId) {
           return null;
         }
+        binding = latestBinding;
       }
 
       const reduced = applyTurnPatch(snapshot.state, template, patch, {
@@ -412,7 +440,9 @@ export class TrackerEngine {
 
       await this.linkCardPortraitIfAvailable(userId, chatId, reduced.state);
 
+      const finalIdempotencyKey = `${chatId}:${binding.messageId}:${binding.swipeId}:${binding.contentHash}`;
       this.processedTurnKeys.add(idempotencyKey);
+      this.processedTurnKeys.add(finalIdempotencyKey);
       if (this.processedTurnKeys.size > 400) {
         const oldest = this.processedTurnKeys.values().next().value;
         if (oldest) this.processedTurnKeys.delete(oldest);
@@ -458,7 +488,14 @@ export class TrackerEngine {
         });
       }
 
+      this.recentTrackedTargets.set(jobKey, { messageId: targetMsg.id, at: Date.now() });
       return committed;
+      } finally {
+        if (stageKey) this.stagedInlineTags.delete(stageKey);
+        if (options.targetMessageId && this.activeTrackTargets.get(jobKey) === options.targetMessageId) {
+          this.activeTrackTargets.delete(jobKey);
+        }
+      }
     });
   }
 
@@ -470,6 +507,9 @@ export class TrackerEngine {
     chatId: string,
     changedMessageId?: string,
   ): Promise<CampaignSnapshot | null> {
+    if (this.isTrackingMessage(userId, chatId, changedMessageId)) {
+      return null;
+    }
     this.cancelInFlight(userId, chatId);
     return this.storage.queue(userId, chatId, async () => {
       const snapshot = await this.storage.loadCampaign(userId, chatId);
