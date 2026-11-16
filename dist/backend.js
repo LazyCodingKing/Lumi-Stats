@@ -3026,17 +3026,10 @@ function buildCompactFormatExample(state, template, hasPersistedState = false, r
   for (const f of template.dossierFields.filter((df) => df.enabled && !df.locked)) {
     if (f.id === "role_summary") {
       if (!isCompact || !hasPersistedState)
-        charExample.role = "Role";
-    } else if (f.id === "demeanor")
-      charExample.demeanor = "...";
-    else if (f.id === "inner_thought")
-      charExample.thought = "...";
-    else if (f.id === "immediate_goal")
-      charExample.goal = "...";
-    else if (f.id === "attire_layers")
-      charExample.attire = "...";
-    else
+        charExample.role_summary = "Role";
+    } else {
       charExample[f.id] = "...";
+    }
   }
   Object.assign(charExample, flatMeters);
   if (template.surfaces.trackNpcBonds !== false) {
@@ -3291,31 +3284,35 @@ ${formattedRule}`);
 ${corePromptHints.join(`
 `)}` : "";
   }
-  const defaultFieldInstMap = new Map(defaultDossierFields().map((df) => [df.id, df.instruction.trim()]));
+  const COMPACT_PER_TURN_CUES = {
+    inner_thought: "1st-person unspoken thought this turn",
+    demeanor: "mood/expression",
+    immediate_goal: "current aim"
+  };
   let dossierSection = "";
   if (isCompact && state.initialized) {
-    const unchangedDefKeys = [];
-    const customOrEditedHints = [];
+    const staticDefKeys = [];
+    const activeHints = [];
     for (const f of editedDefaultFields) {
-      if (f.instruction.trim() !== (defaultFieldInstMap.get(f.id) ?? "")) {
-        customOrEditedHints.push(`"${f.id}" (${clipAtWordBoundary(f.instruction, 160)})`);
+      if (COMPACT_PER_TURN_CUES[f.id]) {
+        activeHints.push(`"${f.id}" (${COMPACT_PER_TURN_CUES[f.id]})`);
       } else {
-        unchangedDefKeys.push(f.id);
+        staticDefKeys.push(f.id);
       }
     }
     for (const f of customDossierFields) {
-      customOrEditedHints.push(`"${f.id}" (${clipAtWordBoundary(f.instruction, 160)})`);
+      activeHints.push(`"${f.id}" (${clipAtWordBoundary(f.instruction, 140)})`);
     }
     const parts = [
-      unchangedDefKeys.length ? `keys: ${unchangedDefKeys.join(", ")}` : "",
-      ...customOrEditedHints
+      ...activeHints,
+      staticDefKeys.length ? `omit if unchanged: ${staticDefKeys.join(", ")}` : ""
     ].filter(Boolean);
     if (parts.length) {
-      dossierSection = `Dossier Fields (omit unchanged): ${parts.join(" | ")}`;
+      dossierSection = `Dossier Fields: ${parts.join(" | ")}`;
     }
   } else {
     const dossierHints = [
-      ...editedDefaultFields.map((f) => `"${f.id}" (${clipAtWordBoundary(f.instruction, 160)})`),
+      ...editedDefaultFields.map((f) => `"${f.id}" (${clipAtWordBoundary(f.instruction, 130)})`),
       ...customDossierFields.map((f) => `"${f.id}" (${clipAtWordBoundary(f.instruction, 160)})`)
     ];
     if (dossierHints.length) {
@@ -4010,18 +4007,20 @@ function applyTurnPatch(before, template, patch, options = {}) {
   const extraStatBags = [];
   if (patch.player && typeof patch.player === "object") {
     const pObj = patch.player;
+    const condText = pObj.condition ?? pObj.state;
+    const actionText = pObj.notableAction ?? pObj.action ?? pObj.notable_action;
     if (typeof pObj.attire === "string" && pObj.attire.trim() && isBuiltinWritable("player_attire", coreCfg?.trackPlayerAttire !== false)) {
       next.player.attire = cleanStringValue(pObj.attire);
     }
-    if (typeof pObj.condition === "string" && pObj.condition.trim() && isBuiltinWritable("player_condition", coreCfg?.trackPlayerCondition !== false)) {
-      next.player.condition = cleanStringValue(pObj.condition);
+    if (typeof condText === "string" && condText.trim() && isBuiltinWritable("player_condition", coreCfg?.trackPlayerCondition !== false)) {
+      next.player.condition = cleanStringValue(condText);
     }
-    if (typeof pObj.notableAction === "string" && pObj.notableAction.trim() && isBuiltinWritable("player_action", Boolean(coreCfg?.trackPlayerAction))) {
-      next.player.notableAction = cleanStringValue(pObj.notableAction);
+    if (typeof actionText === "string" && actionText.trim() && isBuiltinWritable("player_action", Boolean(coreCfg?.trackPlayerAction))) {
+      next.player.notableAction = cleanStringValue(actionText);
     }
     const playerStatCandidates = {};
     for (const [pk, pv] of Object.entries(pObj)) {
-      if (!["attire", "condition", "notableAction", "name"].includes(pk) && pv !== undefined) {
+      if (!["attire", "condition", "state", "notableAction", "notable_action", "action", "name"].includes(pk) && pv !== undefined) {
         playerStatCandidates[pk] = pv;
       }
     }
@@ -4279,11 +4278,11 @@ function applyTurnPatch(before, template, patch, options = {}) {
         const matchedPlace = next.places[slugifyKey(charLocText, "")] ?? Object.values(next.places).find((p) => p.name.toLowerCase() === charLocLow);
         char.locationId = matchedPlace ? matchedPlace.id : slugifyKey(charLocText, char.locationId || "");
       }
-      const roleVal = String(rawChar.roleSummary ?? rawCharRec.role ?? rawCharRec.relationshipStatus ?? "").trim();
+      const roleVal = String(rawChar.roleSummary ?? rawCharRec.role_summary ?? rawCharRec.role ?? rawCharRec.relationshipStatus ?? "").trim();
       const demVal = String(rawChar.demeanor ?? rawCharRec.emotion ?? rawCharRec.mood ?? "").trim();
-      const thoughtVal = String(rawChar.innerThought ?? rawCharRec.thought ?? rawCharRec.internal_thought ?? "").trim();
-      const goalVal = String(rawChar.immediateGoal ?? rawCharRec.goal ?? rawCharRec.aim ?? "").trim();
-      const attireVal = String(rawChar.attire ?? rawCharRec.clothing ?? "").trim();
+      const thoughtVal = String(rawChar.innerThought ?? rawCharRec.inner_thought ?? rawCharRec.thought ?? rawCharRec.internal_thought ?? rawCharRec.inner_monologue ?? rawCharRec.monologue ?? "").trim();
+      const goalVal = String(rawChar.immediateGoal ?? rawCharRec.immediate_goal ?? rawCharRec.goal ?? rawCharRec.aim ?? "").trim();
+      const attireVal = String(rawChar.attire ?? rawCharRec.attire_layers ?? rawCharRec.clothing ?? rawCharRec.outfit ?? "").trim();
       const isDossierFieldAllowed = (fid) => {
         if (bypassLocks)
           return true;
@@ -4319,11 +4318,30 @@ function applyTurnPatch(before, template, patch, options = {}) {
       if (typeof rawCharRec.notes === "string") {
         char.notes = cleanStringValue(rawCharRec.notes).slice(0, 2000);
       }
+      const DOSSIER_KEY_ALIASES = {
+        role: "role_summary",
+        rolesummary: "role_summary",
+        emotion: "demeanor",
+        mood: "demeanor",
+        thought: "inner_thought",
+        innerthought: "inner_thought",
+        internal_thought: "inner_thought",
+        inner_monologue: "inner_thought",
+        monologue: "inner_thought",
+        goal: "immediate_goal",
+        immediategoal: "immediate_goal",
+        aim: "immediate_goal",
+        attire: "attire_layers",
+        clothing: "attire_layers",
+        outfit: "attire_layers"
+      };
       if (rawChar.fields && typeof rawChar.fields === "object") {
         for (const [fk, fv] of Object.entries(rawChar.fields)) {
           if (typeof fv === "string" && fv.trim()) {
-            const matchedField = template.dossierFields.find((f) => f.id === fk || slugifyKey(f.label, "") === slugifyKey(fk, ""));
-            const targetKey = matchedField?.id ?? slugifyKey(fk, "field");
+            const aliasKey = DOSSIER_KEY_ALIASES[fk.toLowerCase()] ?? DOSSIER_KEY_ALIASES[slugifyKey(fk, "")];
+            const lookupKey = aliasKey ?? fk;
+            const matchedField = template.dossierFields.find((f) => f.id === lookupKey || slugifyKey(f.label, "") === slugifyKey(fk, ""));
+            const targetKey = matchedField?.id ?? aliasKey ?? slugifyKey(fk, "field");
             if (!bypassLocks && matchedField?.locked)
               continue;
             const cleanedField = cleanStringValue(fv).slice(0, 1000);
@@ -4355,19 +4373,26 @@ function applyTurnPatch(before, template, patch, options = {}) {
         "aliases",
         "present",
         "role",
+        "role_summary",
         "roleSummary",
         "relationshipStatus",
         "demeanor",
         "emotion",
         "mood",
         "innerThought",
+        "inner_thought",
         "thought",
         "internal_thought",
+        "inner_monologue",
+        "monologue",
         "immediateGoal",
+        "immediate_goal",
         "goal",
         "aim",
         "attire",
+        "attire_layers",
         "clothing",
+        "outfit",
         "location",
         "locationId",
         "conditions",

@@ -659,12 +659,10 @@ export function buildCompactFormatExample(
   };
   for (const f of template.dossierFields.filter(df => df.enabled && !df.locked)) {
     if (f.id === 'role_summary') {
-      if (!isCompact || !hasPersistedState) charExample.role = 'Role';
-    } else if (f.id === 'demeanor') charExample.demeanor = '...';
-    else if (f.id === 'inner_thought') charExample.thought = '...';
-    else if (f.id === 'immediate_goal') charExample.goal = '...';
-    else if (f.id === 'attire_layers') charExample.attire = '...';
-    else charExample[f.id] = '...';
+      if (!isCompact || !hasPersistedState) charExample.role_summary = 'Role';
+    } else {
+      charExample[f.id] = '...';
+    }
   }
   Object.assign(charExample, flatMeters);
   if (template.surfaces.trackNpcBonds !== false) {
@@ -1024,31 +1022,36 @@ export function compileExtractorPrompt(
     coreSection = corePromptHints.length ? `Core & Scene Pill Rules:\n${corePromptHints.join('\n')}` : '';
   }
 
-  const defaultFieldInstMap = new Map(defaultDossierFields().map(df => [df.id, df.instruction.trim()]));
+  const COMPACT_PER_TURN_CUES: Record<string, string> = {
+    inner_thought: '1st-person unspoken thought this turn',
+    demeanor: 'mood/expression',
+    immediate_goal: 'current aim',
+  };
+
   let dossierSection = '';
   if (isCompact && state.initialized) {
-    const unchangedDefKeys: string[] = [];
-    const customOrEditedHints: string[] = [];
+    const staticDefKeys: string[] = [];
+    const activeHints: string[] = [];
     for (const f of editedDefaultFields) {
-      if (f.instruction.trim() !== (defaultFieldInstMap.get(f.id) ?? '')) {
-        customOrEditedHints.push(`"${f.id}" (${clipAtWordBoundary(f.instruction, 160)})`);
+      if (COMPACT_PER_TURN_CUES[f.id]) {
+        activeHints.push(`"${f.id}" (${COMPACT_PER_TURN_CUES[f.id]})`);
       } else {
-        unchangedDefKeys.push(f.id);
+        staticDefKeys.push(f.id);
       }
     }
     for (const f of customDossierFields) {
-      customOrEditedHints.push(`"${f.id}" (${clipAtWordBoundary(f.instruction, 160)})`);
+      activeHints.push(`"${f.id}" (${clipAtWordBoundary(f.instruction, 140)})`);
     }
     const parts = [
-      unchangedDefKeys.length ? `keys: ${unchangedDefKeys.join(', ')}` : '',
-      ...customOrEditedHints,
+      ...activeHints,
+      staticDefKeys.length ? `omit if unchanged: ${staticDefKeys.join(', ')}` : '',
     ].filter(Boolean);
     if (parts.length) {
-      dossierSection = `Dossier Fields (omit unchanged): ${parts.join(' | ')}`;
+      dossierSection = `Dossier Fields: ${parts.join(' | ')}`;
     }
   } else {
     const dossierHints = [
-      ...editedDefaultFields.map(f => `"${f.id}" (${clipAtWordBoundary(f.instruction, 160)})`),
+      ...editedDefaultFields.map(f => `"${f.id}" (${clipAtWordBoundary(f.instruction, 130)})`),
       ...customDossierFields.map(f => `"${f.id}" (${clipAtWordBoundary(f.instruction, 160)})`),
     ];
     if (dossierHints.length) {
