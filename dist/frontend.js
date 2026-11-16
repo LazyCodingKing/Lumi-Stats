@@ -7129,14 +7129,14 @@ function isTextLikeStat(s) {
 // src/shared/state-reducer.ts
 function inferBondCategory(label, note = "") {
   const txt = `${label} ${note}`.toLowerCase();
+  if (/\b(?:rival|enemy|nemesis|hostile|antagonist|foe|hatred|bitter|estranged|ex-|ex\b|breakup|broken\s+up|betray|furious|resent|adversary|suspicious|threat)\b/.test(txt)) {
+    return "rival";
+  }
   if (/\b(?:sister|brother|sibling|mother|mom|father|dad|parent|son|daughter|cousin|aunt|uncle|family|twin|niece|nephew|guardian)\b/.test(txt)) {
     return "family";
   }
   if (/\b(?:lover|partner|wife|husband|spouse|fianc[eé]e?|boyfriend|girlfriend|crush|sweetheart|romantic|beloved|infatuat)\b/.test(txt)) {
     return "romance";
-  }
-  if (/\b(?:rival|enemy|nemesis|hostile|antagonist|foe|hatred|bitter|estranged|ex-|ex\b|adversary|suspicious|threat)\b/.test(txt)) {
-    return "rival";
   }
   if (/\b(?:boss|employer|employee|subordinate|maid|butler|servant|retainer|master|teacher|student|mentor|apprentice|client|doctor|colleague|coworker|captain|commander)\b/.test(txt)) {
     return "professional";

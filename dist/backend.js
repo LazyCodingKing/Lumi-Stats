@@ -2622,12 +2622,19 @@ function buildLeanSidecarStateSnapshot(state, template, recentTranscriptText = "
           compactOffscreenMeters[s.id] = m.value;
         }
       }
+      const compactOffscreenBonds = Object.values(c.peerBonds ?? {}).map((b) => ({
+        target: b.toName,
+        label: b.label,
+        ...b.attitude ? { attitude: b.attitude } : {},
+        ...Object.keys(b.meters ?? {}).length ? { meters: b.meters } : {}
+      }));
       return {
         id: c.id,
         name: c.name,
         present: false,
         role: c.roleSummary,
-        ...Object.keys(compactOffscreenMeters).length ? { meters: compactOffscreenMeters } : {}
+        ...Object.keys(compactOffscreenMeters).length ? { meters: compactOffscreenMeters } : {},
+        ...compactOffscreenBonds.length ? { peerBonds: compactOffscreenBonds } : {}
       };
     }
     const meters = {};
@@ -3326,7 +3333,7 @@ ${corePromptHints.join(`
     `<lumi_stats_protocol>`,
     `REQUIRED: End EVERY reply (after prose/footers) with <lumi-stats>{JSON}</lumi-stats> (ASCII spaces only; omit unchanged keys).`,
     `1. CAST: Active/mentioned NPCs in "characters[]" ("present": true|false, "location", "bondToPlayer", "bondFromPlayer" if new/changed). Use "+N"/"-N" deltas for numeric meters.`,
-    template.surfaces.trackNpcBonds !== false ? `2. PEER BONDS ("peerBonds[]"): Track NPC\u2194NPC bonds whenever two NPCs interact, or when prose references an offscreen person (e.g. a relative, caller, colleague) or a separate identity/original body (never collapse distinct identities). Set {"target","label","category":"family|friend|romance|rival|professional|neutral","attitude"${charNumeric.length ? `,"meters":{${charNumeric.map((s) => `"${s.id}":${s.min}..${s.max}`).join(",")}}` : ""}}.` : "",
+    template.surfaces.trackNpcBonds !== false ? `2. PEER BONDS ("peerBonds[]"): Emit/update whenever two NPCs interact, an offscreen/referenced person is mentioned, OR any event/revelation shifts how an NPC feels about or stands with another NPC (even if offscreen\u2014e.g. breakup, betrayal, distrust, reconciliation). Set {"target","label","category":"family|friend|romance|rival|professional|neutral","attitude"${charNumeric.length ? `,"meters":{${charNumeric.map((s) => `"${s.id}":${s.min}..${s.max}`).join(",")}}` : ""}}.` : "",
     `3. UPDATE (${trackedTargets.join(", ")}):`,
     categoryRuleLines.length ? `Category Rules:
 ${categoryRuleLines.join(`
@@ -3786,14 +3793,14 @@ function pickBetterCasedLabel(existing, incoming, fromIdSlug = false) {
 }
 function inferBondCategory(label, note = "") {
   const txt = `${label} ${note}`.toLowerCase();
+  if (/\b(?:rival|enemy|nemesis|hostile|antagonist|foe|hatred|bitter|estranged|ex-|ex\b|breakup|broken\s+up|betray|furious|resent|adversary|suspicious|threat)\b/.test(txt)) {
+    return "rival";
+  }
   if (/\b(?:sister|brother|sibling|mother|mom|father|dad|parent|son|daughter|cousin|aunt|uncle|family|twin|niece|nephew|guardian)\b/.test(txt)) {
     return "family";
   }
   if (/\b(?:lover|partner|wife|husband|spouse|fianc[e\u00E9]e?|boyfriend|girlfriend|crush|sweetheart|romantic|beloved|infatuat)\b/.test(txt)) {
     return "romance";
-  }
-  if (/\b(?:rival|enemy|nemesis|hostile|antagonist|foe|hatred|bitter|estranged|ex-|ex\b|adversary|suspicious|threat)\b/.test(txt)) {
-    return "rival";
   }
   if (/\b(?:boss|employer|employee|subordinate|maid|butler|servant|retainer|master|teacher|student|mentor|apprentice|client|doctor|colleague|coworker|captain|commander)\b/.test(txt)) {
     return "professional";
@@ -4543,7 +4550,10 @@ function applyTurnPatch(before, template, patch, options = {}) {
         const resolvedLabel = cleanStringValue(String(bObj.label ?? bObj.relation ?? bObj.dynamic ?? prevBond?.label ?? "Acquaintance"));
         const resolvedAttitude = cleanStringValue(String(bObj.attitude ?? bObj.note ?? bObj.thought ?? prevBond?.attitude ?? ""));
         const validCat = new Set(["family", "friend", "romance", "rival", "professional", "neutral"]);
-        const resolvedCategory = typeof bObj.category === "string" && validCat.has(bObj.category) ? bObj.category : prevBond?.category ?? inferBondCategory(resolvedLabel, resolvedAttitude);
+        const labelChanged = Boolean(prevBond && resolvedLabel !== prevBond.label);
+        const attitudeChanged = Boolean(prevBond && resolvedAttitude !== prevBond.attitude);
+        const inferredCat = inferBondCategory(resolvedLabel, resolvedAttitude);
+        const resolvedCategory = typeof bObj.category === "string" && validCat.has(bObj.category) ? bObj.category : labelChanged || attitudeChanged ? inferredCat !== "neutral" ? inferredCat : prevBond?.category ?? "neutral" : prevBond?.category ?? inferredCat;
         char.peerBonds[targetSlug] = {
           fromId: charId,
           toId: targetSlug,

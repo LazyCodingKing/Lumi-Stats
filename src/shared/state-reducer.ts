@@ -264,14 +264,14 @@ function pickBetterCasedLabel(
 
 export function inferBondCategory(label: string, note = ''): BondCategory {
   const txt = `${label} ${note}`.toLowerCase();
+  if (/\b(?:rival|enemy|nemesis|hostile|antagonist|foe|hatred|bitter|estranged|ex-|ex\b|breakup|broken\s+up|betray|furious|resent|adversary|suspicious|threat)\b/.test(txt)) {
+    return 'rival';
+  }
   if (/\b(?:sister|brother|sibling|mother|mom|father|dad|parent|son|daughter|cousin|aunt|uncle|family|twin|niece|nephew|guardian)\b/.test(txt)) {
     return 'family';
   }
   if (/\b(?:lover|partner|wife|husband|spouse|fianc[eé]e?|boyfriend|girlfriend|crush|sweetheart|romantic|beloved|infatuat)\b/.test(txt)) {
     return 'romance';
-  }
-  if (/\b(?:rival|enemy|nemesis|hostile|antagonist|foe|hatred|bitter|estranged|ex-|ex\b|adversary|suspicious|threat)\b/.test(txt)) {
-    return 'rival';
   }
   if (/\b(?:boss|employer|employee|subordinate|maid|butler|servant|retainer|master|teacher|student|mentor|apprentice|client|doctor|colleague|coworker|captain|commander)\b/.test(txt)) {
     return 'professional';
@@ -1242,10 +1242,15 @@ export function applyTurnPatch(
           String(bObj.attitude ?? bObj.note ?? bObj.thought ?? prevBond?.attitude ?? ''),
         );
         const validCat = new Set(['family', 'friend', 'romance', 'rival', 'professional', 'neutral']);
+        const labelChanged = Boolean(prevBond && resolvedLabel !== prevBond.label);
+        const attitudeChanged = Boolean(prevBond && resolvedAttitude !== prevBond.attitude);
+        const inferredCat = inferBondCategory(resolvedLabel, resolvedAttitude);
         const resolvedCategory =
           typeof bObj.category === 'string' && validCat.has(bObj.category)
             ? (bObj.category as BondCategory)
-            : prevBond?.category ?? inferBondCategory(resolvedLabel, resolvedAttitude);
+            : labelChanged || attitudeChanged
+              ? (inferredCat !== 'neutral' ? inferredCat : (prevBond?.category ?? 'neutral'))
+              : (prevBond?.category ?? inferredCat);
 
         char.peerBonds[targetSlug] = {
           fromId: charId,

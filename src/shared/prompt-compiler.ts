@@ -142,12 +142,19 @@ export function buildLeanSidecarStateSnapshot(
           compactOffscreenMeters[s.id] = m.value;
         }
       }
+      const compactOffscreenBonds = Object.values(c.peerBonds ?? {}).map(b => ({
+        target: b.toName,
+        label: b.label,
+        ...(b.attitude ? { attitude: b.attitude } : {}),
+        ...(Object.keys(b.meters ?? {}).length ? { meters: b.meters } : {}),
+      }));
       return {
         id: c.id,
         name: c.name,
         present: false,
         role: c.roleSummary,
         ...(Object.keys(compactOffscreenMeters).length ? { meters: compactOffscreenMeters } : {}),
+        ...(compactOffscreenBonds.length ? { peerBonds: compactOffscreenBonds } : {}),
       };
     }
 
@@ -1066,7 +1073,7 @@ export function compileExtractorPrompt(
     `REQUIRED: End EVERY reply (after prose/footers) with <lumi-stats>{JSON}</lumi-stats> (ASCII spaces only; omit unchanged keys).`,
     `1. CAST: Active/mentioned NPCs in "characters[]" ("present": true|false, "location", "bondToPlayer", "bondFromPlayer" if new/changed). Use "+N"/"-N" deltas for numeric meters.`,
     template.surfaces.trackNpcBonds !== false
-      ? `2. PEER BONDS ("peerBonds[]"): Track NPC↔NPC bonds whenever two NPCs interact, or when prose references an offscreen person (e.g. a relative, caller, colleague) or a separate identity/original body (never collapse distinct identities). Set {"target","label","category":"family|friend|romance|rival|professional|neutral","attitude"${charNumeric.length ? `,"meters":{${charNumeric.map(s => `"${s.id}":${s.min}..${s.max}`).join(',')}}` : ''}}.`
+      ? `2. PEER BONDS ("peerBonds[]"): Emit/update whenever two NPCs interact, an offscreen/referenced person is mentioned, OR any event/revelation shifts how an NPC feels about or stands with another NPC (even if offscreen—e.g. breakup, betrayal, distrust, reconciliation). Set {"target","label","category":"family|friend|romance|rival|professional|neutral","attitude"${charNumeric.length ? `,"meters":{${charNumeric.map(s => `"${s.id}":${s.min}..${s.max}`).join(',')}}` : ''}}.`
       : '',
     `3. UPDATE (${trackedTargets.join(', ')}):`,
     categoryRuleLines.length ? `Category Rules:\n${categoryRuleLines.join('\n')}` : '',
