@@ -1223,6 +1223,16 @@ export function normalizeImportedTemplate(rawInput: unknown, nameOverride?: stri
     }
   }
 
+  dossierFields = dossierFields.map(f =>
+    f.id === 'inner_thought'
+      ? {
+          ...f,
+          showInHudCast: f.showInHudCast !== false,
+          showInInlineCast: f.showInInlineCast !== false,
+        }
+      : f,
+  );
+
   const defaultsCore = defaultCoreTrackersConfig();
   const rawCoreTrackers =
     raw.coreTrackers && typeof raw.coreTrackers === 'object'

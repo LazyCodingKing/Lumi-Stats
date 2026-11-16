@@ -1037,9 +1037,9 @@ export function compileExtractorPrompt(
     coreSection = corePromptHints.length ? `Core & Scene Pill Rules:\n${corePromptHints.join('\n')}` : '';
   }
 
-  const COMPACT_PER_TURN_CUES: Record<string, string> = {
-    inner_thought: '1st-person unspoken thought this turn',
-    demeanor: 'mood/expression',
+  const PER_TURN_DOSSIER_CUES: Record<string, string> = {
+    inner_thought: 'REQUIRED for EVERY present NPC: fresh 1st-person unspoken thought this turn',
+    demeanor: 'current mood/expression',
     immediate_goal: 'current aim',
   };
 
@@ -1048,8 +1048,8 @@ export function compileExtractorPrompt(
     const staticDefKeys: string[] = [];
     const activeHints: string[] = [];
     for (const f of editedDefaultFields) {
-      if (COMPACT_PER_TURN_CUES[f.id]) {
-        activeHints.push(`"${f.id}" (${COMPACT_PER_TURN_CUES[f.id]})`);
+      if (PER_TURN_DOSSIER_CUES[f.id]) {
+        activeHints.push(`"${f.id}" (${PER_TURN_DOSSIER_CUES[f.id]})`);
       } else {
         staticDefKeys.push(f.id);
       }
@@ -1079,7 +1079,7 @@ export function compileExtractorPrompt(
   const rawProtocol = [
     `<lumi_stats_protocol>`,
     `REQUIRED: End EVERY reply (after prose/footers) with <lumi-stats>{JSON}</lumi-stats> (ASCII spaces only; omit unchanged keys).`,
-    `1. CAST: Active/mentioned NPCs in "characters[]" ("present": true|false, "location", "bondToPlayer", "bondFromPlayer" if new/changed). Use "+N"/"-N" deltas for numeric meters.`,
+    `1. CAST: List active/mentioned NPCs in "characters[]" ("present": true if in room, false if offscreen; set "location", "bondToPlayer", "bondFromPlayer" on new/changed bonds). Use "+N"/"-N" deltas for numeric meters; omit unchanged static fields (always update per-turn inner_thought & demeanor for present NPCs).`,
     template.surfaces.trackNpcBonds !== false
       ? `2. PEER BONDS ("peerBonds[]"): Emit/update whenever two NPCs interact, an offscreen/referenced person is mentioned, OR any event/revelation shifts how an NPC feels about or stands with another NPC (even if offscreen—e.g. breakup, betrayal, distrust, reconciliation). Set {"target","label","category":"family|friend|romance|rival|professional|neutral","attitude"${charNumeric.length ? `,"meters":{${charNumeric.map(s => `"${s.id}":${s.min}..${s.max}`).join(',')}}` : ''}}.`
       : '',

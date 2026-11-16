@@ -968,43 +968,68 @@ export function applyTurnPatch(
         char.locationId = matchedPlace ? matchedPlace.id : slugifyKey(charLocText, char.locationId || '');
       }
 
+      const unwrapFieldText = (raw: unknown): string => {
+        if (raw === null || raw === undefined) return '';
+        if (typeof raw === 'string') {
+          const cleaned = cleanStringValue(raw);
+          return /^(?:none|n\/a|\?|∅|unchanged)$/i.test(cleaned) ? '' : cleaned;
+        }
+        if (Array.isArray(raw)) {
+          return raw.map(unwrapFieldText).filter(Boolean).join('; ');
+        }
+        if (typeof raw === 'object' && 'value' in (raw as Record<string, unknown>)) {
+          return unwrapFieldText((raw as StatPatchInput).value);
+        }
+        return '';
+      };
+
       const DOSSIER_KEY_ALIASES: Record<string, string> = {
         role: 'role_summary',
         rolesummary: 'role_summary',
+        role_summary: 'role_summary',
+        relationshipstatus: 'role_summary',
         emotion: 'demeanor',
         mood: 'demeanor',
         thought: 'inner_thought',
+        thoughts: 'inner_thought',
         innerthought: 'inner_thought',
+        inner_thought: 'inner_thought',
         internal_thought: 'inner_thought',
+        internalthought: 'inner_thought',
         inner_monologue: 'inner_thought',
+        innermonologue: 'inner_thought',
         monologue: 'inner_thought',
         goal: 'immediate_goal',
         immediategoal: 'immediate_goal',
+        immediate_goal: 'immediate_goal',
         aim: 'immediate_goal',
         attire: 'attire_layers',
+        attire_layers: 'attire_layers',
         clothing: 'attire_layers',
         outfit: 'attire_layers',
       };
 
-      const roleVal = String(
-        rawChar.roleSummary ?? rawCharRec.role_summary ?? rawCharRec.role ?? rawCharRec.relationshipStatus ?? '',
-      ).trim();
-      const demVal = String(rawChar.demeanor ?? rawCharRec.emotion ?? rawCharRec.mood ?? '').trim();
-      const thoughtVal = String(
+      const roleVal = unwrapFieldText(
+        rawChar.roleSummary ?? rawCharRec.role_summary ?? rawCharRec.role ?? rawCharRec.relationshipStatus,
+      );
+      const demVal = unwrapFieldText(rawChar.demeanor ?? rawCharRec.emotion ?? rawCharRec.mood);
+      const thoughtVal = unwrapFieldText(
         rawChar.innerThought ??
           rawCharRec.inner_thought ??
           rawCharRec.thought ??
+          rawCharRec.thoughts ??
           rawCharRec.internal_thought ??
+          rawCharRec.internalThought ??
           rawCharRec.inner_monologue ??
-          rawCharRec.monologue ??
-          '',
-      ).trim();
-      const goalVal = String(
-        rawChar.immediateGoal ?? rawCharRec.immediate_goal ?? rawCharRec.goal ?? rawCharRec.aim ?? '',
-      ).trim();
-      const attireVal = String(
-        rawChar.attire ?? rawCharRec.attire_layers ?? rawCharRec.clothing ?? rawCharRec.outfit ?? '',
-      ).trim();
+          rawCharRec.innerMonologue ??
+          rawCharRec.monologue,
+      );
+      const goalVal = unwrapFieldText(
+        rawChar.immediateGoal ?? rawCharRec.immediate_goal ?? rawCharRec.goal ?? rawCharRec.aim,
+      );
+      const attireVal = unwrapFieldText(
+        rawChar.attire ?? rawCharRec.attire_layers ?? rawCharRec.clothing ?? rawCharRec.outfit,
+      );
 
       const isDossierFieldAllowed = (fid: string) => {
         if (bypassLocks) return true;
@@ -1041,18 +1066,22 @@ export function applyTurnPatch(
         char.notes = cleanStringValue(rawCharRec.notes).slice(0, 2000);
       }
 
+      const resolveDossierKey = (rawKey: string) => {
+        const aliasKey = DOSSIER_KEY_ALIASES[rawKey.toLowerCase()] ?? DOSSIER_KEY_ALIASES[slugifyKey(rawKey, '')];
+        const lookupKey = aliasKey ?? rawKey;
+        const matchedField = template.dossierFields.find(
+          f => f.id === lookupKey || slugifyKey(f.label, '') === slugifyKey(rawKey, ''),
+        );
+        return { matchedField, targetKey: matchedField?.id ?? aliasKey ?? slugifyKey(rawKey, 'field') };
+      };
+
       if (rawChar.fields && typeof rawChar.fields === 'object') {
         for (const [fk, fv] of Object.entries(rawChar.fields)) {
-          if (typeof fv === 'string' && fv.trim()) {
-            const aliasKey = DOSSIER_KEY_ALIASES[fk.toLowerCase()] ?? DOSSIER_KEY_ALIASES[slugifyKey(fk, '')];
-            const lookupKey = aliasKey ?? fk;
-            const matchedField = template.dossierFields.find(
-              f => f.id === lookupKey || slugifyKey(f.label, '') === slugifyKey(fk, ''),
-            );
-            const targetKey = matchedField?.id ?? aliasKey ?? slugifyKey(fk, 'field');
-            if (!bypassLocks && matchedField?.locked) continue;
-            assignDossierField(targetKey, fv);
-          }
+          const textVal = unwrapFieldText(fv);
+          if (!textVal) continue;
+          const { matchedField, targetKey } = resolveDossierKey(fk);
+          if (!bypassLocks && matchedField?.locked) continue;
+          assignDossierField(targetKey, textVal);
         }
       }
 
@@ -1073,11 +1102,12 @@ export function applyTurnPatch(
 
       const RESERVED_CHAR_KEYS = new Set([
         'id', 'name', 'aliases', 'present', 'role', 'role_summary', 'roleSummary', 'relationshipStatus',
-        'demeanor', 'emotion', 'mood', 'innerThought', 'inner_thought', 'thought', 'internal_thought',
-        'inner_monologue', 'monologue', 'immediateGoal', 'immediate_goal', 'goal', 'aim',
-        'attire', 'attire_layers', 'clothing', 'outfit', 'location', 'locationId',
-        'conditions', 'fields', 'meters', 'stats', 'peerBonds', 'npcBonds', 'bonds', 'secrets', 'notes',
-        'bondToPlayer', 'bondFromPlayer', 'npcToUser', 'userToNpc', 'relationToPlayer', 'playerBond',
+        'demeanor', 'emotion', 'mood', 'innerThought', 'inner_thought', 'thought', 'thoughts',
+        'internal_thought', 'internalThought', 'inner_monologue', 'innerMonologue', 'monologue',
+        'immediateGoal', 'immediate_goal', 'goal', 'aim', 'attire', 'attire_layers', 'clothing', 'outfit',
+        'location', 'locationId', 'conditions', 'fields', 'meters', 'stats', 'peerBonds', 'npcBonds',
+        'bonds', 'secrets', 'notes', 'bondToPlayer', 'bondFromPlayer', 'npcToUser', 'userToNpc',
+        'relationToPlayer', 'playerBond',
       ]);
       const combinedMeters: Record<string, StatPatchInput | number | string | boolean> = {};
       if (rawCharRec.stats && typeof rawCharRec.stats === 'object' && !Array.isArray(rawCharRec.stats)) {
@@ -1089,13 +1119,10 @@ export function applyTurnPatch(
       for (const [ck, cv] of Object.entries(rawCharRec)) {
         if (RESERVED_CHAR_KEYS.has(ck) || cv === null || cv === undefined) continue;
         if (typeof cv === 'number' || typeof cv === 'boolean' || typeof cv === 'string') {
-          const aliasKey = DOSSIER_KEY_ALIASES[ck.toLowerCase()] ?? DOSSIER_KEY_ALIASES[slugifyKey(ck, '')];
-          const lookupKey = aliasKey ?? ck;
-          const matchedField = template.dossierFields.find(
-            f => f.id === lookupKey || slugifyKey(f.label, '') === slugifyKey(ck, ''),
-          );
+          const { matchedField } = resolveDossierKey(ck);
           if (matchedField && typeof cv === 'string') {
-            if (bypassLocks || !matchedField.locked) assignDossierField(matchedField.id, cv);
+            const textVal = unwrapFieldText(cv);
+            if (textVal && (bypassLocks || !matchedField.locked)) assignDossierField(matchedField.id, textVal);
           } else {
             combinedMeters[ck] = cv;
           }
@@ -1105,13 +1132,10 @@ export function applyTurnPatch(
       for (const [mk, mv] of Object.entries(combinedMeters)) {
         const schema = matchStatSchema(template.stats, mk, 'character');
         if (!schema) {
-          const aliasKey = DOSSIER_KEY_ALIASES[mk.toLowerCase()] ?? DOSSIER_KEY_ALIASES[slugifyKey(mk, '')];
-          const lookupKey = aliasKey ?? mk;
-          const matchedField = template.dossierFields.find(
-            f => f.id === lookupKey || slugifyKey(f.label, '') === slugifyKey(mk, ''),
-          );
-          if (matchedField && typeof mv === 'string' && mv.trim()) {
-            if (bypassLocks || !matchedField.locked) assignDossierField(matchedField.id, mv);
+          const { matchedField } = resolveDossierKey(mk);
+          const textVal = unwrapFieldText(mv);
+          if (matchedField && textVal && (bypassLocks || !matchedField.locked)) {
+            assignDossierField(matchedField.id, textVal);
           }
           continue;
         }
