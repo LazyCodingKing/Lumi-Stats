@@ -3105,7 +3105,8 @@ ${formattedRule}`);
       cueText = cueText.replace(/0[\u2013-]100\s*scale\.\s*/gi, "").replace(/Calibrate[^.;]*?\([^)]*\)[^.;]*[.;]\s*/gi, "").trim();
     }
     const cueShort = cueText ? clipAtWordBoundary(cueText, needsFullCalibration ? 240 : 110) : "";
-    return `${s.id}[${s.min}..${s.max},${mode}${cueShort ? `: ${cueShort}` : ""}]`;
+    const labelHint = slugifyKey(s.label, "") !== s.id ? ` "${s.label}"` : "";
+    return `${s.id}${labelHint}[${s.min}..${s.max},${mode}${cueShort ? `: ${cueShort}` : ""}]`;
   };
   const charNumeric = charSchemas.filter((s) => !isTextLikeStat(s) && s.kind !== "boolean");
   const otherNumeric = otherSchemas.filter((s) => !isTextLikeStat(s) && s.kind !== "boolean");
@@ -3115,7 +3116,7 @@ ${formattedRule}`);
   for (const s of textAndCustomSchemas) {
     const cueClean = s.triggerCues ? s.triggerCues.replace(/\r?\n+/g, " \u2014 ").replace(/\s+/g, " ").trim() : "Concise update";
     const scopeTag = s.scope === "character" ? "NPC" : "stat";
-    const labelToken = `"${s.id}"(${scopeTag})`;
+    const labelToken = slugifyKey(s.label, "") !== s.id ? `"${s.id}"("${s.label}",${scopeTag})` : `"${s.id}"(${scopeTag})`;
     const normKey = cueClean.toLowerCase();
     const existingGroup = cueGroupMap.get(normKey);
     if (existingGroup && cueClean.length > 20) {
@@ -3216,7 +3217,7 @@ ${corePromptHints.join(`
     `ACTIVE REQUIRED CONTRACT: In EVERY reply, after all prose and preset footers, append one <lumi-stats>{...JSON...}</lumi-stats> block (use hyphenated <lumi-stats>).`,
     `1. CAST: List active/mentioned NPCs in "characters[]" ("present": true if in room, false if offscreen; set "location", "bondToPlayer", "bondFromPlayer" on new/changed bonds). Use "+N"/"-N" deltas for numeric meters; omit unchanged fields.`,
     template.surfaces.trackNpcBonds !== false ? `2. PEER BONDS ("peerBonds[]"): For NPC\u2194NPC relations, set {"target","label","category":"family|friend|romance|rival|professional|neutral","attitude"}.` : "",
-    `3. UPDATE (${trackedTargets.join(", ")}):`,
+    `3. UPDATE (${trackedTargets.join(", ")} \u2014 use ONLY the exact stat/meter keys listed below; omit any removed or unlisted keys):`,
     categoryRuleLines.length ? `Category Rules:
 ${categoryRuleLines.join(`
 `)}` : "",
@@ -3237,16 +3238,22 @@ ${groupedTextRules.join(`
   ].filter(Boolean).join(`
 `);
 }
-function buildChatVariableProjection(state) {
+function buildChatVariableProjection(state, template) {
   const banner = formatSceneBanner(state);
+  const allowedNonChar = template ? new Set(template.stats.filter((s) => s.enabled && s.scope !== "character").map((s) => s.id)) : null;
+  const allowedChar = template ? new Set(template.stats.filter((s) => s.enabled && s.scope === "character").map((s) => s.id)) : null;
   const statsFlat = {};
   for (const [k, v] of Object.entries(state.stats)) {
+    if (allowedNonChar && !allowedNonChar.has(k))
+      continue;
     statsFlat[k] = v.value;
   }
   const actorsFlat = {};
   for (const [id, char] of Object.entries(state.characters)) {
     const metersFlat = {};
     for (const [mk, mv] of Object.entries(char.meters)) {
+      if (allowedChar && !allowedChar.has(mk))
+        continue;
       metersFlat[mk] = mv.value;
     }
     actorsFlat[id] = {
@@ -4983,8 +4990,45 @@ class LumiStorage {
     });
     return next;
   }
+  clearOwnerMirrorForChat(userId, chatId) {
+    if (!chatId)
+      return;
+    if (!userId?.trim()) {
+      const suffix = `:${chatId}`;
+      for (const map of [
+        this.templateCache,
+        this.stateCache,
+        this.checkpointCache,
+        this.continuityCache
+      ]) {
+        for (const k of map.keys()) {
+          if (k.endsWith(suffix))
+            map.delete(k);
+        }
+      }
+      for (const k of this.explicitChatTemplates) {
+        if (k.endsWith(suffix))
+          this.explicitChatTemplates.delete(k);
+      }
+    } else {
+      const ownerKey = `__owner__:${chatId}`;
+      this.templateCache.delete(ownerKey);
+      this.stateCache.delete(ownerKey);
+      this.checkpointCache.delete(ownerKey);
+      this.continuityCache.delete(ownerKey);
+      this.explicitChatTemplates.delete(ownerKey);
+    }
+  }
   getSettingsSync(userId) {
-    return structuredClone(this.settingsCache.get(this.userKey(userId)) ?? DEFAULT_USER_SETTINGS);
+    const uk = this.userKey(userId);
+    let cached = this.settingsCache.get(uk);
+    if (!cached && !userId?.trim()) {
+      for (const v of this.settingsCache.values()) {
+        cached = v;
+        break;
+      }
+    }
+    return structuredClone(cached ?? DEFAULT_USER_SETTINGS);
   }
   async loadSettings(userId) {
     const uk = this.userKey(userId);
@@ -5027,9 +5071,11 @@ class LumiStorage {
     return raw.map((item) => normalizeImportedTemplate(item));
   }
   evictTemplateFromCache(userId, templateId) {
-    const prefix = `${this.userKey(userId)}:`;
+    const uk = this.userKey(userId);
+    const prefix = `${uk}:`;
     for (const [key, tpl] of this.templateCache.entries()) {
-      if (key.startsWith(prefix) && tpl.id === templateId) {
+      const matchesUser = uk === "__owner__" || key.startsWith(prefix) || key.startsWith("__owner__:");
+      if (matchesUser && tpl.id === templateId) {
         this.templateCache.delete(key);
         this.explicitChatTemplates.delete(key);
         this.continuityCache.delete(key);
@@ -5059,6 +5105,7 @@ class LumiStorage {
       const filtered = list.filter((t) => t.id !== normalized.id);
       const next = [...filtered, normalized].slice(-50);
       await this.api.userStorage.setJson("templates.json", next, { indent: 2, userId });
+      this.evictTemplateFromCache(userId, normalized.id);
       return { library: next, saved: normalized };
     });
   }
@@ -5118,6 +5165,7 @@ class LumiStorage {
   async saveChatTemplate(userId, chatId, template) {
     await this.ensureDirs(userId);
     const normalized = normalizeImportedTemplate(template, template.name);
+    this.clearOwnerMirrorForChat(userId, chatId);
     const key = this.scopeKey(userId, chatId);
     this.explicitChatTemplates.add(key);
     this.setBoundedCache(this.templateCache, key, structuredClone(normalized));
@@ -5148,23 +5196,41 @@ class LumiStorage {
   }
   getStateAndTemplateSync(userId, chatId) {
     const key = this.scopeKey(userId, chatId);
-    const template = this.templateCache.get(key) ?? createDefaultTemplate();
-    const env = this.stateCache.get(key);
-    const state = env?.state ?? createEmptyCampaignState(template);
+    let template = this.templateCache.get(key);
+    let env = this.stateCache.get(key);
+    if (!userId?.trim() && chatId) {
+      const suffix = `:${chatId}`;
+      if (!template) {
+        for (const [k, v] of this.templateCache.entries()) {
+          if (k.endsWith(suffix)) {
+            template = v;
+            break;
+          }
+        }
+      }
+      if (!env) {
+        for (const [k, v] of this.stateCache.entries()) {
+          if (k.endsWith(suffix)) {
+            env = v;
+            break;
+          }
+        }
+      }
+    }
+    const resolvedTemplate = template ?? createDefaultTemplate();
+    const state = env?.state ?? createEmptyCampaignState(resolvedTemplate);
     return {
       state: structuredClone(state),
-      template: structuredClone(template),
+      template: structuredClone(resolvedTemplate),
       revision: env?.revision ?? 0
     };
   }
-  async syncNativeLumiverseSurfaces(userId, chatId, revision, state, template, persistChatVars = true) {
+  async syncNativeLumiverseSurfaces(userId, chatId, _revision, state, template, persistChatVars = true) {
     if (!chatId || chatId === "sandbox")
       return;
-    const projection = buildChatVariableProjection(state);
-    const flatVars = buildFlatChatVariablesMap(state, template);
+    const projection = buildChatVariableProjection(state, template);
     const banner = formatSceneBanner(state);
     const clock = formatStoryClock(state.elapsedMinutes);
-    const continuity = this.getCompiledContinuity(userId, chatId, revision, state, template, 6000).text;
     if (persistChatVars) {
       try {
         await Promise.all([
@@ -5175,22 +5241,6 @@ class LumiStorage {
         ]);
       } catch {}
     }
-    try {
-      const settings = this.getSettingsSync(userId);
-      const verbosity = settings.protocolVerbosity ?? "compact";
-      const formatMacroVal = `<lumi-stats>
-${buildCompactFormatExample(state, template, state.initialized, "", { verbosity })}
-</lumi-stats>`;
-      const instructionsMacroVal = `At the end of your reply, append the updated state wrapped in <lumi-stats>{...JSON...}</lumi-stats>:
-${compileExtractorPrompt(state, template, "", { verbosity })}`;
-      this.api.updateMacroValue?.("lumi_stats", continuity);
-      this.api.updateMacroValue?.("lumi_header", banner.formatted);
-      this.api.updateMacroValue?.("lumi_clock", clock);
-      this.api.updateMacroValue?.("lumi_format", formatMacroVal);
-      this.api.updateMacroValue?.("lumi_instructions", instructionsMacroVal);
-      this.api.updateMacroValue?.("lumi_var_table", Object.entries(flatVars).filter(([k]) => k.startsWith("lumi_stat_") || k.startsWith("lumi_char_")).map(([k, v]) => `@${k}: ${v}`).join(`
-`));
-    } catch {}
     try {
       this.api.rpcPool?.sync("state.current", {
         chatId,
@@ -5335,6 +5385,7 @@ ${compileExtractorPrompt(state, template, "", { verbosity })}`;
       state: after,
       bindings
     };
+    this.clearOwnerMirrorForChat(userId, chatId);
     const key = this.scopeKey(userId, chatId);
     this.setBoundedCache(this.stateCache, key, structuredClone(env));
     this.continuityCache.delete(key);
@@ -5463,6 +5514,7 @@ ${compileExtractorPrompt(state, template, "", { verbosity })}`;
       state: restored,
       bindings: keptBindings
     };
+    this.clearOwnerMirrorForChat(userId, chatId);
     const key = this.scopeKey(userId, chatId);
     this.setBoundedCache(this.stateCache, key, structuredClone(env));
     this.continuityCache.delete(key);
@@ -6149,6 +6201,82 @@ class LumiStatsService {
       busy: this.tracker.isBusy(resolvedUser, effectiveChatId)
     }, frontendSessionId);
   }
+  reconcileStateWithTemplate(nextState, template, statRenames = []) {
+    for (const rename of statRenames) {
+      const fromId = rename?.fromId?.trim();
+      const toId = rename?.toId?.trim();
+      if (!fromId || !toId || fromId === toId)
+        continue;
+      if (nextState.stats[fromId] && !nextState.stats[toId]) {
+        nextState.stats[toId] = { ...nextState.stats[fromId], id: toId };
+      }
+      delete nextState.stats[fromId];
+      for (const actor of Object.values(nextState.characters)) {
+        if (actor.meters[fromId] && !actor.meters[toId]) {
+          actor.meters[toId] = { ...actor.meters[fromId] };
+        }
+        delete actor.meters[fromId];
+      }
+      for (const mod of nextState.modifiers) {
+        if (mod.statId === fromId)
+          mod.statId = toId;
+      }
+      for (const entry of nextState.auditLog) {
+        if (entry.statId === fromId)
+          entry.statId = toId;
+      }
+    }
+    const activeNonCharIds = new Set(template.stats.filter((s) => s.scope !== "character").map((s) => s.id));
+    const activeCharIds = new Set(template.stats.filter((s) => s.scope === "character").map((s) => s.id));
+    for (const key of Object.keys(nextState.stats)) {
+      if (!activeNonCharIds.has(key))
+        delete nextState.stats[key];
+    }
+    for (const actor of Object.values(nextState.characters)) {
+      for (const key of Object.keys(actor.meters)) {
+        if (!activeCharIds.has(key))
+          delete actor.meters[key];
+      }
+    }
+    for (const def of template.stats) {
+      if (!def.enabled)
+        continue;
+      const isTextDef = def.kind === "text" || def.kind === "tags" || def.kind === "tier" || def.kind === "skill_tree" || def.kind === "xp_level" || def.kind === "attributes" || def.kind === "inventory" || def.kind === "status_fx" || Boolean(def.displayStyle && def.displayStyle !== "auto");
+      if (def.scope === "character") {
+        for (const actor of Object.values(nextState.characters)) {
+          const curM = actor.meters[def.id];
+          if (!curM) {
+            actor.meters[def.id] = {
+              value: def.defaultValue,
+              calibrated: false,
+              locked: def.locked
+            };
+          } else if (isTextDef && typeof curM.value === "number") {
+            curM.value = typeof def.defaultValue === "string" ? def.defaultValue : String(curM.value);
+          }
+        }
+        continue;
+      }
+      const existing = nextState.stats[def.id];
+      if (!existing) {
+        nextState.stats[def.id] = {
+          id: def.id,
+          scope: def.scope,
+          value: def.defaultValue,
+          calibrated: false,
+          locked: def.locked
+        };
+      } else {
+        existing.scope = def.scope;
+        existing.locked = def.locked;
+        if (isTextDef && typeof existing.value === "number") {
+          existing.value = typeof def.defaultValue === "string" ? def.defaultValue : String(existing.value);
+        } else if (!isTextDef && typeof existing.value === "number") {
+          existing.value = Math.max(def.min, Math.min(def.max, existing.value));
+        }
+      }
+    }
+  }
   async syncCampaignStatsToTemplate(userId, chatId, template, reason) {
     if (!chatId || chatId === "sandbox")
       return;
@@ -6156,44 +6284,7 @@ class LumiStatsService {
     await this.storage.queue(resolvedUser, chatId, async () => {
       const snap = await this.storage.loadCampaign(resolvedUser, chatId);
       const nextState = structuredClone(snap.state);
-      for (const def of template.stats) {
-        if (!def.enabled)
-          continue;
-        const isTextDef = def.kind === "text" || def.kind === "tags" || def.kind === "tier" || def.kind === "skill_tree" || def.kind === "xp_level" || def.kind === "attributes" || def.kind === "inventory" || def.kind === "status_fx" || Boolean(def.displayStyle && def.displayStyle !== "auto");
-        if (def.scope === "character") {
-          for (const actor of Object.values(nextState.characters)) {
-            const curM = actor.meters[def.id];
-            if (!curM) {
-              actor.meters[def.id] = {
-                value: def.defaultValue,
-                calibrated: false,
-                locked: def.locked
-              };
-            } else if (isTextDef && typeof curM.value === "number") {
-              curM.value = typeof def.defaultValue === "string" ? def.defaultValue : String(curM.value);
-            }
-          }
-          continue;
-        }
-        const existing = nextState.stats[def.id];
-        if (!existing) {
-          nextState.stats[def.id] = {
-            id: def.id,
-            scope: def.scope,
-            value: def.defaultValue,
-            calibrated: false,
-            locked: def.locked
-          };
-        } else {
-          existing.scope = def.scope;
-          existing.locked = def.locked;
-          if (isTextDef && typeof existing.value === "number") {
-            existing.value = typeof def.defaultValue === "string" ? def.defaultValue : String(existing.value);
-          } else if (!isTextDef && typeof existing.value === "number") {
-            existing.value = Math.max(def.min, Math.min(def.max, existing.value));
-          }
-        }
-      }
+      this.reconcileStateWithTemplate(nextState, template);
       recomputeDerivedStats(template.stats, nextState, template.categories ?? []);
       await this.storage.commitCampaign(resolvedUser, chatId, snap.state, nextState, reason);
     });
@@ -6546,38 +6637,8 @@ class LumiStatsService {
             if (customLib.some((t) => t.id === nextTemplate.id)) {
               await this.storage.upsertCustomTemplateInLibrary(userId, nextTemplate);
             }
-            for (const def of nextTemplate.stats) {
-              if (!def.enabled)
-                continue;
-              const isTextDef = def.kind === "text" || def.kind === "tags" || def.kind === "tier" || Boolean(def.displayStyle && def.displayStyle !== "auto");
-              if (def.scope === "character") {
-                for (const actor of Object.values(nextState.characters)) {
-                  const curM = actor.meters[def.id];
-                  if (!curM) {
-                    actor.meters[def.id] = {
-                      value: def.defaultValue,
-                      calibrated: false,
-                      locked: def.locked
-                    };
-                  } else if (isTextDef && typeof curM.value === "number") {
-                    curM.value = typeof def.defaultValue === "string" ? def.defaultValue : String(curM.value);
-                  }
-                }
-              } else {
-                const curS = nextState.stats[def.id];
-                if (!curS) {
-                  nextState.stats[def.id] = {
-                    id: def.id,
-                    scope: def.scope,
-                    value: def.defaultValue,
-                    calibrated: false,
-                    locked: def.locked
-                  };
-                } else if (isTextDef && typeof curS.value === "number") {
-                  curS.value = typeof def.defaultValue === "string" ? def.defaultValue : String(curS.value);
-                }
-              }
-            }
+            const statRenames = Array.isArray(payload.statRenames) ? payload.statRenames : [];
+            this.reconcileStateWithTemplate(nextState, nextTemplate, statRenames);
           }
           if (payload.patch && typeof payload.patch === "object") {
             const reduced = applyTurnPatch(nextState, nextTemplate, payload.patch, { isManualEdit: true });
@@ -6872,7 +6933,16 @@ class LumiStatsService {
     const releaseTagCap = this.api.frontendCapabilities?.declare("message_tag_interceptor");
     if (releaseTagCap)
       this.disposers.push(releaseTagCap);
-    this.storage.loadSettings().then(() => this.syncObfuscatorDisplayRegex(undefined)).catch(() => {
+    this.storage.loadSettings().then(async () => {
+      await this.syncObfuscatorDisplayRegex(undefined);
+      if (this.api.permissions.has("chats")) {
+        const active = await this.api.chats.getActive(undefined).catch(() => null);
+        if (active?.id) {
+          this.rememberActiveChat(undefined, active.id);
+          await this.storage.loadCampaign(undefined, active.id);
+        }
+      }
+    }).catch(() => {
       return;
     });
     this.disposers.push(this.api.onFrontendMessage((rawPayload, userId, frontendSessionId) => {
@@ -6980,14 +7050,35 @@ class LumiStatsService {
             this.broadcastSnapshot(userId, chatId);
           }
         }
-        const cleanedMessages = messages.map((m) => {
-          if (!m || m.role === "system" || typeof m.content !== "string")
-            return m;
-          let txt = stripInlineStatsTags(m.content);
+        const cleanTextSegment = (raw) => {
+          let txt = stripInlineStatsTags(raw);
           if (settings.cleanBraille && hasBrailleOrWhitespaceArtifacts(txt)) {
             txt = cleanBrailleAndProseWhitespace(txt);
           }
-          return txt !== m.content ? { ...m, content: txt } : m;
+          return txt;
+        };
+        const cleanedMessages = messages.map((m) => {
+          if (!m || m.role === "system")
+            return m;
+          if (typeof m.content === "string") {
+            const txt = cleanTextSegment(m.content);
+            return txt !== m.content ? { ...m, content: txt } : m;
+          }
+          if (Array.isArray(m.content)) {
+            let changed = false;
+            const nextParts = m.content.map((part) => {
+              if (part && part.type === "text" && typeof part.text === "string") {
+                const txt = cleanTextSegment(part.text);
+                if (txt !== part.text) {
+                  changed = true;
+                  return { ...part, text: txt };
+                }
+              }
+              return part;
+            });
+            return changed ? { ...m, content: nextParts } : m;
+          }
+          return m;
         });
         let charBudget = Math.max(400, settings.tokenBudget * 4);
         let continuity = this.storage.getCompiledContinuity(userId, chatId, snap.revision, snap.state, snap.template, charBudget);
@@ -7009,10 +7100,26 @@ class LumiStatsService {
             }
           } catch {}
         }
-        const promptAlreadyHasContinuity = cleanedMessages.some((m) => typeof m?.content === "string" && (m.content.includes("[Lumi Stats \xB7") || m.content.includes("Scene: [") || continuity.text.length > 32 && m.content.includes(continuity.text.slice(0, 32))));
-        const promptAlreadyHasProtocol = cleanedMessages.some((m) => typeof m?.content === "string" && m.content.includes("<lumi_stats_protocol>"));
+        const getMessagePlainText = (m) => {
+          if (!m)
+            return "";
+          if (typeof m.content === "string")
+            return m.content;
+          if (Array.isArray(m.content)) {
+            return m.content.filter((p) => p && p.type === "text" && typeof p.text === "string").map((p) => p.text).join(`
+`);
+          }
+          return "";
+        };
+        const promptAlreadyHasContinuity = cleanedMessages.some((m) => {
+          const text = getMessagePlainText(m);
+          if (!text)
+            return false;
+          return text.includes("[Lumi Stats \xB7") || continuity.text.length > 0 && text.includes(continuity.text);
+        });
+        const promptAlreadyHasProtocol = cleanedMessages.some((m) => getMessagePlainText(m).includes("<lumi_stats_protocol>"));
         const shouldInjectContinuity = !promptAlreadyHasContinuity && Boolean(snap.state.canonPremise || settings.injectContinuity && continuity.text);
-        const recentTextForGating = cleanedMessages.filter((m) => m?.__isChatHistory).slice(-4).map((m) => typeof m.content === "string" ? m.content : "").join(`
+        const recentTextForGating = cleanedMessages.filter((m) => m?.__isChatHistory).slice(-4).map((m) => getMessagePlainText(m)).join(`
 `);
         const inlineContract = settings.extractionMode === "inline_tag" && !promptAlreadyHasProtocol ? `Append updated state at the end as <lumi-stats>{...JSON...}</lumi-stats>:
 ${compileExtractorPrompt(snap.state, snap.template, recentTextForGating, { verbosity: settings.protocolVerbosity ?? "compact", skipContinuityCategoryRules: Boolean(shouldInjectContinuity && settings.injectContinuity && continuity.text) })}` : "";
@@ -7180,7 +7287,8 @@ ${compileExtractorPrompt(snap.state, snap.template, recentTextForGating, { verbo
         const env = o.env && typeof o.env === "object" ? o.env : {};
         const envChat = env.chat && typeof env.chat === "object" ? env.chat : {};
         const rawUserId = typeof o.userId === "string" ? o.userId : undefined;
-        const chatId = String(o.chatId ?? o.chat_id ?? envChat.id ?? envChat.chatId ?? this.lastActiveChatByUser.get(rawUserId?.trim() || "__owner__") ?? "").trim();
+        const fallbackUser = this.resolveUserId(rawUserId);
+        const chatId = String(o.chatId ?? o.chat_id ?? envChat.id ?? envChat.chatId ?? this.lastActiveChatByUser.get(rawUserId?.trim() || "__owner__") ?? (fallbackUser ? this.lastActiveChatByUser.get(fallbackUser) : undefined) ?? "").trim();
         const userId = this.resolveUserId(rawUserId, chatId);
         return {
           userId,
@@ -7269,9 +7377,10 @@ ${compileExtractorPrompt(snap.state, snap.template, recentTextForGating, { verbo
         returnType: "string",
         volatile: true,
         handler: (ctx) => {
-          const { state, template } = readSyncForMacro(ctx);
+          const { userId, state, template } = readSyncForMacro(ctx);
+          const verbosity = this.storage.getSettingsSync(userId).protocolVerbosity ?? "compact";
           return `<lumi-stats>
-${buildCompactFormatExample(state, template, state.initialized)}
+${buildCompactFormatExample(state, template, state.initialized, "", { verbosity })}
 </lumi-stats>`;
         }
       });
@@ -7282,9 +7391,10 @@ ${buildCompactFormatExample(state, template, state.initialized)}
         returnType: "string",
         volatile: true,
         handler: (ctx) => {
-          const { state, template } = readSyncForMacro(ctx);
+          const { userId, state, template } = readSyncForMacro(ctx);
+          const verbosity = this.storage.getSettingsSync(userId).protocolVerbosity ?? "compact";
           return `At the end of your reply, append the updated state wrapped in <lumi-stats>{...JSON...}</lumi-stats>:
-${compileExtractorPrompt(state, template)}`;
+${compileExtractorPrompt(state, template, "", { verbosity })}`;
         }
       });
       this.disposers.push(() => {
@@ -7434,7 +7544,7 @@ ${compileExtractorPrompt(state, template)}`;
           return null;
         const resolvedOwner = this.resolveUserId(ownerUser, chatId);
         const snap = await this.storage.loadCampaign(resolvedOwner, chatId);
-        return buildChatVariableProjection(snap.state);
+        return buildChatVariableProjection(snap.state, snap.template);
       }, { requires: [] });
       this.disposers.push(() => {
         this.api.rpcPool?.unregister("state.current");

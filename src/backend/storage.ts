@@ -2,9 +2,6 @@ import type { SpindleAPI } from 'lumiverse-spindle-types';
 import { formatSceneBanner, formatStoryClock } from '../shared/formula';
 import {
   buildChatVariableProjection,
-  buildCompactFormatExample,
-  buildFlatChatVariablesMap,
-  compileExtractorPrompt,
   compileNarratorContinuity,
 } from '../shared/prompt-compiler';
 import { diffCampaignStates } from '../shared/state-reducer';
@@ -189,8 +186,43 @@ export class LumiStorage {
     return next;
   }
 
+  private clearOwnerMirrorForChat(userId: string | undefined, chatId: string): void {
+    if (!chatId) return;
+    if (!userId?.trim()) {
+      const suffix = `:${chatId}`;
+      for (const map of [
+        this.templateCache,
+        this.stateCache,
+        this.checkpointCache,
+        this.continuityCache,
+      ] as Array<Map<string, unknown>>) {
+        for (const k of map.keys()) {
+          if (k.endsWith(suffix)) map.delete(k);
+        }
+      }
+      for (const k of this.explicitChatTemplates) {
+        if (k.endsWith(suffix)) this.explicitChatTemplates.delete(k);
+      }
+    } else {
+      const ownerKey = `__owner__:${chatId}`;
+      this.templateCache.delete(ownerKey);
+      this.stateCache.delete(ownerKey);
+      this.checkpointCache.delete(ownerKey);
+      this.continuityCache.delete(ownerKey);
+      this.explicitChatTemplates.delete(ownerKey);
+    }
+  }
+
   getSettingsSync(userId?: string): LumiUserSettings {
-    return structuredClone(this.settingsCache.get(this.userKey(userId)) ?? DEFAULT_USER_SETTINGS);
+    const uk = this.userKey(userId);
+    let cached = this.settingsCache.get(uk);
+    if (!cached && !userId?.trim()) {
+      for (const v of this.settingsCache.values()) {
+        cached = v;
+        break;
+      }
+    }
+    return structuredClone(cached ?? DEFAULT_USER_SETTINGS);
   }
 
   async loadSettings(userId?: string): Promise<LumiUserSettings> {
@@ -239,9 +271,11 @@ export class LumiStorage {
   }
 
   evictTemplateFromCache(userId: string | undefined, templateId: string): void {
-    const prefix = `${this.userKey(userId)}:`;
+    const uk = this.userKey(userId);
+    const prefix = `${uk}:`;
     for (const [key, tpl] of this.templateCache.entries()) {
-      if (key.startsWith(prefix) && tpl.id === templateId) {
+      const matchesUser = uk === '__owner__' || key.startsWith(prefix) || key.startsWith('__owner__:');
+      if (matchesUser && tpl.id === templateId) {
         this.templateCache.delete(key);
         this.explicitChatTemplates.delete(key);
         this.continuityCache.delete(key);
@@ -277,6 +311,7 @@ export class LumiStorage {
       const filtered = list.filter(t => t.id !== normalized.id);
       const next = [...filtered, normalized].slice(-50);
       await this.api.userStorage.setJson('templates.json', next, { indent: 2, userId });
+      this.evictTemplateFromCache(userId, normalized.id);
       return { library: next, saved: normalized };
     });
   }
@@ -373,6 +408,7 @@ export class LumiStorage {
   ): Promise<LumiStatsTemplate> {
     await this.ensureDirs(userId);
     const normalized = normalizeImportedTemplate(template, template.name);
+    this.clearOwnerMirrorForChat(userId, chatId);
     const key = this.scopeKey(userId, chatId);
     this.explicitChatTemplates.add(key);
     this.setBoundedCache(this.templateCache, key, structuredClone(normalized));
@@ -422,12 +458,32 @@ export class LumiStorage {
     chatId: string,
   ): { state: CampaignState; template: LumiStatsTemplate; revision: number } {
     const key = this.scopeKey(userId, chatId);
-    const template = this.templateCache.get(key) ?? createDefaultTemplate();
-    const env = this.stateCache.get(key);
-    const state = env?.state ?? createEmptyCampaignState(template);
+    let template = this.templateCache.get(key);
+    let env = this.stateCache.get(key);
+    if (!userId?.trim() && chatId) {
+      const suffix = `:${chatId}`;
+      if (!template) {
+        for (const [k, v] of this.templateCache.entries()) {
+          if (k.endsWith(suffix)) {
+            template = v;
+            break;
+          }
+        }
+      }
+      if (!env) {
+        for (const [k, v] of this.stateCache.entries()) {
+          if (k.endsWith(suffix)) {
+            env = v;
+            break;
+          }
+        }
+      }
+    }
+    const resolvedTemplate = template ?? createDefaultTemplate();
+    const state = env?.state ?? createEmptyCampaignState(resolvedTemplate);
     return {
       state: structuredClone(state),
-      template: structuredClone(template),
+      template: structuredClone(resolvedTemplate),
       revision: env?.revision ?? 0,
     };
   }
@@ -441,17 +497,15 @@ export class LumiStorage {
   async syncNativeLumiverseSurfaces(
     userId: string | undefined,
     chatId: string,
-    revision: number,
+    _revision: number,
     state: CampaignState,
     template: LumiStatsTemplate,
     persistChatVars = true,
   ): Promise<void> {
     if (!chatId || chatId === 'sandbox') return;
-    const projection = buildChatVariableProjection(state);
-    const flatVars = buildFlatChatVariablesMap(state, template);
+    const projection = buildChatVariableProjection(state, template);
     const banner = formatSceneBanner(state);
     const clock = formatStoryClock(state.elapsedMinutes);
-    const continuity = this.getCompiledContinuity(userId, chatId, revision, state, template, 6000).text;
 
     if (persistChatVars) {
       try {
@@ -464,28 +518,6 @@ export class LumiStorage {
       } catch {
         // Safe fallback if chat record was deleted concurrently
       }
-    }
-
-    try {
-      const settings = this.getSettingsSync(userId);
-      const verbosity = settings.protocolVerbosity ?? 'compact';
-      const formatMacroVal = `<lumi-stats>\n${buildCompactFormatExample(state, template, state.initialized, '', { verbosity })}\n</lumi-stats>`;
-      const instructionsMacroVal = `At the end of your reply, append the updated state wrapped in <lumi-stats>{...JSON...}</lumi-stats>:\n${compileExtractorPrompt(state, template, '', { verbosity })}`;
-
-      this.api.updateMacroValue?.('lumi_stats', continuity);
-      this.api.updateMacroValue?.('lumi_header', banner.formatted);
-      this.api.updateMacroValue?.('lumi_clock', clock);
-      this.api.updateMacroValue?.('lumi_format', formatMacroVal);
-      this.api.updateMacroValue?.('lumi_instructions', instructionsMacroVal);
-      this.api.updateMacroValue?.(
-        'lumi_var_table',
-        Object.entries(flatVars)
-          .filter(([k]) => k.startsWith('lumi_stat_') || k.startsWith('lumi_char_'))
-          .map(([k, v]) => `@${k}: ${v}`)
-          .join('\n'),
-      );
-    } catch {
-      // Ignore on minimal hosts
     }
 
     try {
@@ -677,6 +709,7 @@ export class LumiStorage {
       bindings,
     };
 
+    this.clearOwnerMirrorForChat(userId, chatId);
     const key = this.scopeKey(userId, chatId);
     this.setBoundedCache(this.stateCache, key, structuredClone(env));
     this.continuityCache.delete(key);
@@ -839,6 +872,7 @@ export class LumiStorage {
       state: restored,
       bindings: keptBindings,
     };
+    this.clearOwnerMirrorForChat(userId, chatId);
     const key = this.scopeKey(userId, chatId);
     this.setBoundedCache(this.stateCache, key, structuredClone(env));
     this.continuityCache.delete(key);

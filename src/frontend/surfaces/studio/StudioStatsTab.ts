@@ -207,7 +207,12 @@ export function renderStudioStatsTab(
   ctrl: LumiFrontendController,
   compScope: ComponentScope,
   tpl: LumiStatsTemplate,
-  saveTemplatePatch: (patch: Partial<LumiStatsTemplate>, reason?: string) => void,
+  saveTemplatePatch: (
+    patch:
+      | Partial<LumiStatsTemplate>
+      | ((live: LumiStatsTemplate) => Partial<LumiStatsTemplate>),
+    reason?: string,
+  ) => void,
   forceRedraw: () => void,
 ): HTMLElement {
   const wrap = el('div', 'ls-stack');
@@ -285,8 +290,10 @@ export function renderStudioStatsTab(
           volatility: item.volatility,
           triggerCues: item.triggerCues,
         });
-        const nextStats = [...tpl.stats.filter(s => s.id !== created.id), created];
-        saveTemplatePatch({ stats: nextStats }, `Added stat "${created.label}"`);
+        saveTemplatePatch(
+          live => ({ stats: [...live.stats.filter(s => s.id !== created.id), created] }),
+          `Added stat "${created.label}"`,
+        );
         ctrl.notify(`Added "${created.icon} ${created.label}".`);
       },
       `ls-btn-sm ls-quick-pill ${exists ? 'ls-chip-accent' : ''}`,
@@ -336,8 +343,9 @@ export function renderStudioStatsTab(
         checked: schema.enabled,
         ariaLabel: `Toggle ${schema.label}`,
         onChange: on => {
-          schema.enabled = on;
-          saveTemplatePatch({ stats: tpl.stats });
+          saveTemplatePatch(live => ({
+            stats: live.stats.map(s => (s.id === schema.id ? { ...s, enabled: on } : s)),
+          }));
         },
       });
 
@@ -387,18 +395,31 @@ export function renderStudioStatsTab(
             });
             if (selectedKey === 'edit') openStatSchemaModal(ctrl, schema.scope, schema);
             else if (selectedKey === 'pin') {
-              schema.pinnedToHeader = !schema.pinnedToHeader;
-              schema.showIn.pinnedHeader = schema.pinnedToHeader;
-              saveTemplatePatch({ stats: tpl.stats });
+              saveTemplatePatch(live => ({
+                stats: live.stats.map(s =>
+                  s.id === schema.id
+                    ? {
+                        ...s,
+                        pinnedToHeader: !s.pinnedToHeader,
+                        showIn: { ...s.showIn, pinnedHeader: !s.pinnedToHeader },
+                      }
+                    : s,
+                ),
+              }));
             } else if (selectedKey === 'lock') {
-              schema.locked = !schema.locked;
-              saveTemplatePatch({ stats: tpl.stats });
+              saveTemplatePatch(live => ({
+                stats: live.stats.map(s =>
+                  s.id === schema.id ? { ...s, locked: !s.locked } : s,
+                ),
+              }));
             } else if (selectedKey === 'duplicate') {
               openDuplicateStatModal(ctrl, schema);
             } else if (selectedKey === 'test') {
               openSandboxTesterModal(ctrl, schema.id);
             } else if (selectedKey === 'delete') {
-              saveTemplatePatch({ stats: tpl.stats.filter(s => s.id !== schema.id) });
+              saveTemplatePatch(live => ({
+                stats: live.stats.filter(s => s.id !== schema.id),
+              }));
             }
           },
           { className: 'ls-btn-sm ls-btn-icon ls-btn-ghost', title: 'More actions' },
@@ -451,8 +472,11 @@ export function renderStudioStatsTab(
         checked: cat.enabled,
         ariaLabel: `Toggle category ${cat.name}`,
         onChange: on => {
-          cat.enabled = on;
-          saveTemplatePatch({ categories: definedCategories });
+          saveTemplatePatch(live => ({
+            categories: (live.categories ?? []).map(c =>
+              c.id === cat.id ? { ...c, enabled: on } : c,
+            ),
+          }));
         },
       });
       catLeft.append(
@@ -546,7 +570,6 @@ export function renderStudioStatsTab(
           checked: cfg.enabled,
           ariaLabel: `Toggle ${cfg.label}`,
           onChange: on => {
-            const core = { ...(tpl.coreTrackers ?? {}) } as Record<string, unknown>;
             const toggleMap: Record<BuiltInTrackerId, string> = {
               player_attire: 'trackPlayerAttire',
               player_condition: 'trackPlayerCondition',
@@ -558,8 +581,11 @@ export function renderStudioStatsTab(
               npc_conditions: 'trackNpcConditions',
               npc_secrets: 'trackNpcSecrets',
             };
-            core[toggleMap[item.id]] = on;
-            saveTemplatePatch({ coreTrackers: core as unknown as LumiStatsTemplate['coreTrackers'] });
+            saveTemplatePatch(live => {
+              const core = { ...(live.coreTrackers ?? {}) } as Record<string, unknown>;
+              core[toggleMap[item.id]] = on;
+              return { coreTrackers: core as unknown as LumiStatsTemplate['coreTrackers'] };
+            });
           },
         });
         left.append(
@@ -614,8 +640,11 @@ export function renderStudioStatsTab(
           checked: field.enabled,
           ariaLabel: `Toggle ${field.label}`,
           onChange: on => {
-            field.enabled = on;
-            saveTemplatePatch({ dossierFields: tpl.dossierFields });
+            saveTemplatePatch(live => ({
+              dossierFields: live.dossierFields.map(x =>
+                x.id === field.id ? { ...x, enabled: on } : x,
+              ),
+            }));
           },
         });
         left.append(
@@ -627,7 +656,9 @@ export function renderStudioStatsTab(
         right.append(
           btn('Full Edit', () => openDossierFieldModal(ctrl, field), 'ls-btn-sm'),
           iconBtn('trash', () => {
-            saveTemplatePatch({ dossierFields: tpl.dossierFields.filter(x => x.id !== field.id) });
+            saveTemplatePatch(live => ({
+              dossierFields: live.dossierFields.filter(x => x.id !== field.id),
+            }));
           }, { className: 'ls-btn-sm ls-btn-icon ls-btn-ghost ls-btn-danger', title: 'Delete field' }),
         );
         row.append(left, right);

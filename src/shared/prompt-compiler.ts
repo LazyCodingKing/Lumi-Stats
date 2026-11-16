@@ -4,6 +4,7 @@ import {
   parseStatTokens,
   resolveAnchorLabel,
 } from './formula';
+import { slugifyKey } from './templates';
 import type {
   CampaignState,
   CharacterRecord,
@@ -751,7 +752,8 @@ export function compileExtractorPrompt(
         .trim();
     }
     const cueShort = cueText ? clipAtWordBoundary(cueText, needsFullCalibration ? 240 : 110) : '';
-    return `${s.id}[${s.min}..${s.max},${mode}${cueShort ? `: ${cueShort}` : ''}]`;
+    const labelHint = slugifyKey(s.label, '') !== s.id ? ` "${s.label}"` : '';
+    return `${s.id}${labelHint}[${s.min}..${s.max},${mode}${cueShort ? `: ${cueShort}` : ''}]`;
   };
 
   const charNumeric = charSchemas.filter(s => !isTextLikeStat(s) && s.kind !== 'boolean');
@@ -767,7 +769,10 @@ export function compileExtractorPrompt(
       ? s.triggerCues.replace(/\r?\n+/g, ' — ').replace(/\s+/g, ' ').trim()
       : 'Concise update';
     const scopeTag = s.scope === 'character' ? 'NPC' : 'stat';
-    const labelToken = `"${s.id}"(${scopeTag})`;
+    const labelToken =
+      slugifyKey(s.label, '') !== s.id
+        ? `"${s.id}"("${s.label}",${scopeTag})`
+        : `"${s.id}"(${scopeTag})`;
     const normKey = cueClean.toLowerCase();
     const existingGroup = cueGroupMap.get(normKey);
     if (existingGroup && cueClean.length > 20) {
@@ -902,7 +907,7 @@ export function compileExtractorPrompt(
     template.surfaces.trackNpcBonds !== false
       ? `2. PEER BONDS ("peerBonds[]"): For NPC↔NPC relations, set {"target","label","category":"family|friend|romance|rival|professional|neutral","attitude"}.`
       : '',
-    `3. UPDATE (${trackedTargets.join(', ')}):`,
+    `3. UPDATE (${trackedTargets.join(', ')} — use ONLY the exact stat/meter keys listed below; omit any removed or unlisted keys):`,
     categoryRuleLines.length ? `Category Rules:\n${categoryRuleLines.join('\n')}` : '',
     charNumeric.length ? `NPC Meters: ${charNumeric.map(compactNumericTag).join(' | ')}` : '',
     otherNumeric.length ? `Player/World Meters: ${otherNumeric.map(compactNumericTag).join(' | ')}` : '',
@@ -925,10 +930,19 @@ export function compileExtractorPrompt(
 
 export function buildChatVariableProjection(
   state: CampaignState,
+  template?: LumiStatsTemplate,
 ): Record<string, unknown> {
   const banner = formatSceneBanner(state);
+  const allowedNonChar = template
+    ? new Set(template.stats.filter(s => s.enabled && s.scope !== 'character').map(s => s.id))
+    : null;
+  const allowedChar = template
+    ? new Set(template.stats.filter(s => s.enabled && s.scope === 'character').map(s => s.id))
+    : null;
+
   const statsFlat: Record<string, number | string | boolean> = {};
   for (const [k, v] of Object.entries(state.stats)) {
+    if (allowedNonChar && !allowedNonChar.has(k)) continue;
     statsFlat[k] = v.value;
   }
 
@@ -936,6 +950,7 @@ export function buildChatVariableProjection(
   for (const [id, char] of Object.entries(state.characters)) {
     const metersFlat: Record<string, number | string | boolean> = {};
     for (const [mk, mv] of Object.entries(char.meters)) {
+      if (allowedChar && !allowedChar.has(mk)) continue;
       metersFlat[mk] = mv.value;
     }
     actorsFlat[id] = {

@@ -158,14 +158,18 @@ export function preserveScrollAndFocus(
   ) {
     if (options.onDeferredFlush && !active.dataset.lsBlurDeferred) {
       active.dataset.lsBlurDeferred = 'true';
-      active.addEventListener(
-        'blur',
-        () => {
-          delete active.dataset.lsBlurDeferred;
-          options.onDeferredFlush?.();
-        },
-        { once: true },
-      );
+      let timer: ReturnType<typeof setTimeout> | null = null;
+      const flush = () => {
+        if (timer) {
+          clearTimeout(timer);
+          timer = null;
+        }
+        delete active.dataset.lsBlurDeferred;
+        active.removeEventListener('blur', flush);
+        options.onDeferredFlush?.();
+      };
+      active.addEventListener('blur', flush, { once: true });
+      timer = setTimeout(flush, 1250);
     }
     return false;
   }

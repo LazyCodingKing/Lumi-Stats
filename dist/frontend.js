@@ -4544,10 +4544,18 @@ function preserveScrollAndFocus(container, renderFn, options) {
   if (options?.deferIfTyping && (activelyTyping || isOpenSelectOrCombo) && active instanceof HTMLElement && container.contains(active) && (active.tagName === "INPUT" || active.tagName === "TEXTAREA") && active.type !== "checkbox" && active.type !== "radio") {
     if (options.onDeferredFlush && !active.dataset.lsBlurDeferred) {
       active.dataset.lsBlurDeferred = "true";
-      active.addEventListener("blur", () => {
+      let timer = null;
+      const flush = () => {
+        if (timer) {
+          clearTimeout(timer);
+          timer = null;
+        }
         delete active.dataset.lsBlurDeferred;
+        active.removeEventListener("blur", flush);
         options.onDeferredFlush?.();
-      }, { once: true });
+      };
+      active.addEventListener("blur", flush, { once: true });
+      timer = setTimeout(flush, 1250);
     }
     return false;
   }
@@ -10880,10 +10888,20 @@ Supports: + - * / %, round(), floor(), ceil(), min(), max(), clamp(), if(), hasC
       ],
       onChange: (v) => {
         selectedStyle = v;
+        const preserveKinds = new Set([
+          "text",
+          "tags",
+          "tier",
+          "skill_tree",
+          "xp_level",
+          "attributes",
+          "inventory",
+          "status_fx"
+        ]);
         if (selectedStyle === "pill_list") {
           selectedKind = "tags";
           kindCtrl.setValue("tags");
-        } else if (selectedStyle !== "auto" && !["text", "tags", "tier"].includes(selectedKind)) {
+        } else if (selectedStyle !== "auto" && !preserveKinds.has(selectedKind)) {
           selectedKind = "text";
           kindCtrl.setValue("text");
         }
@@ -10953,6 +10971,9 @@ Supports: + - * / %, round(), floor(), ceil(), min(), max(), clamp(), if(), hasC
             selectedSpan = "full";
             spanCtrl.setValue("full");
           }
+        }
+        if (["text", "tags", "tier"].includes(selectedKind) && defInp.value.trim() === "0") {
+          defInp.value = "";
         }
         syncRangeVisibility();
       }
@@ -11059,6 +11080,7 @@ Supports: + - * / %, round(), floor(), ceil(), min(), max(), clamp(), if(), hasC
       const label = labelInp.value.trim();
       if (!label)
         return;
+      const liveTpl = structuredClone(ctrl.snapshot.template);
       const parsedMin = Number(minInp.value);
       const min = minInp.value.trim() !== "" && Number.isFinite(parsedMin) ? parsedMin : 0;
       const parsedMax = Number(maxInp.value);
@@ -11067,9 +11089,19 @@ Supports: + - * / %, round(), floor(), ceil(), min(), max(), clamp(), if(), hasC
       const parsedDefNum = Number(rawDef);
       const defaultValue = selectedKind === "boolean" ? rawDef === "true" || rawDef === "1" : ["meter", "number", "clock", "pips", "hearts", "currency"].includes(selectedKind) && selectedStyle === "auto" ? rawDef !== "" && Number.isFinite(parsedDefNum) ? parsedDefNum : Math.max(Math.min(min, max), Math.min(Math.max(min, max), 0)) : rawDef && rawDef !== "0" ? rawDef : undefined;
       const parsedKeywords = kwInp.value.split(",").map((k) => k.trim().toLowerCase()).filter(Boolean);
+      let nextId = existing?.id;
+      const statRenames = [];
+      if (existing && label.toLowerCase() !== existing.label.trim().toLowerCase()) {
+        const candidateId = slugifyKey(label, existing.id);
+        const idTaken = liveTpl.stats.some((s) => s.id === candidateId && s.id !== existing.id);
+        if (candidateId && candidateId !== existing.id && !idTaken) {
+          nextId = candidateId;
+          statRenames.push({ fromId: existing.id, toId: candidateId });
+        }
+      }
       const created = createStatSchema({
         ...existing,
-        id: existing?.id,
+        id: nextId,
         label,
         icon: iconInp.value.trim() || "\uD83D\uDCCA",
         scope: selectedScope,
@@ -11103,13 +11135,17 @@ Supports: + - * / %, round(), floor(), ceil(), min(), max(), clamp(), if(), hasC
           pinnedHeader: pinnedToHeader
         }
       });
-      const idx = tpl.stats.findIndex((s) => s.id === created.id);
-      if (idx >= 0)
-        tpl.stats[idx] = created;
+      const oldIdx = existing ? liveTpl.stats.findIndex((s) => s.id === existing.id) : -1;
+      const newIdx = liveTpl.stats.findIndex((s) => s.id === created.id);
+      if (oldIdx >= 0)
+        liveTpl.stats[oldIdx] = created;
+      else if (newIdx >= 0)
+        liveTpl.stats[newIdx] = created;
       else
-        tpl.stats.push(created);
+        liveTpl.stats.push(created);
       ctrl.request("state:mutate", {
-        templatePatch: { stats: tpl.stats },
+        templatePatch: { stats: liveTpl.stats },
+        ...statRenames.length ? { statRenames } : {},
         reason: `Saved stat schema "${created.label}"`
       });
       close();
@@ -13777,8 +13813,7 @@ function renderStudioStatsTab(ctrl, compScope, tpl, saveTemplatePatch, forceRedr
         volatility: item.volatility,
         triggerCues: item.triggerCues
       });
-      const nextStats = [...tpl.stats.filter((s) => s.id !== created.id), created];
-      saveTemplatePatch({ stats: nextStats }, `Added stat "${created.label}"`);
+      saveTemplatePatch((live) => ({ stats: [...live.stats.filter((s) => s.id !== created.id), created] }), `Added stat "${created.label}"`);
       ctrl.notify(`Added "${created.icon} ${created.label}".`);
     }, `ls-btn-sm ls-quick-pill ${exists ? "ls-chip-accent" : ""}`, item.triggerCues);
     quickRow.append(b);
@@ -13810,8 +13845,9 @@ function renderStudioStatsTab(ctrl, compScope, tpl, saveTemplatePatch, forceRedr
         checked: schema.enabled,
         ariaLabel: `Toggle ${schema.label}`,
         onChange: (on) => {
-          schema.enabled = on;
-          saveTemplatePatch({ stats: tpl.stats });
+          saveTemplatePatch((live) => ({
+            stats: live.stats.map((s) => s.id === schema.id ? { ...s, enabled: on } : s)
+          }));
         }
       });
       const showRange = !isTextLikeStat(schema) && schema.kind !== "boolean";
@@ -13841,18 +13877,25 @@ function renderStudioStatsTab(ctrl, compScope, tpl, saveTemplatePatch, forceRedr
         if (selectedKey === "edit")
           openStatSchemaModal(ctrl, schema.scope, schema);
         else if (selectedKey === "pin") {
-          schema.pinnedToHeader = !schema.pinnedToHeader;
-          schema.showIn.pinnedHeader = schema.pinnedToHeader;
-          saveTemplatePatch({ stats: tpl.stats });
+          saveTemplatePatch((live) => ({
+            stats: live.stats.map((s) => s.id === schema.id ? {
+              ...s,
+              pinnedToHeader: !s.pinnedToHeader,
+              showIn: { ...s.showIn, pinnedHeader: !s.pinnedToHeader }
+            } : s)
+          }));
         } else if (selectedKey === "lock") {
-          schema.locked = !schema.locked;
-          saveTemplatePatch({ stats: tpl.stats });
+          saveTemplatePatch((live) => ({
+            stats: live.stats.map((s) => s.id === schema.id ? { ...s, locked: !s.locked } : s)
+          }));
         } else if (selectedKey === "duplicate") {
           openDuplicateStatModal(ctrl, schema);
         } else if (selectedKey === "test") {
           openSandboxTesterModal(ctrl, schema.id);
         } else if (selectedKey === "delete") {
-          saveTemplatePatch({ stats: tpl.stats.filter((s) => s.id !== schema.id) });
+          saveTemplatePatch((live) => ({
+            stats: live.stats.filter((s) => s.id !== schema.id)
+          }));
         }
       }, { className: "ls-btn-sm ls-btn-icon ls-btn-ghost", title: "More actions" }));
       row.append(left, right);
@@ -13892,8 +13935,9 @@ function renderStudioStatsTab(ctrl, compScope, tpl, saveTemplatePatch, forceRedr
         checked: cat.enabled,
         ariaLabel: `Toggle category ${cat.name}`,
         onChange: (on) => {
-          cat.enabled = on;
-          saveTemplatePatch({ categories: definedCategories });
+          saveTemplatePatch((live) => ({
+            categories: (live.categories ?? []).map((c) => c.id === cat.id ? { ...c, enabled: on } : c)
+          }));
         }
       });
       catLeft.append(catSwSlot, el("strong", "", `${cat.icon} ${cat.name}`), el("span", "ls-chip", `${members.length} stats`), ...cat.aiRule ? [el("span", "ls-chip ls-chip-accent", "Shared Rule")] : [], ...cat.localRuleFormula ? [el("span", "ls-chip ls-chip-accent", "⚡ Local Rule")] : [], ...cat.promptTriggerMode === "conditional" ? [el("span", "ls-chip", "\uD83D\uDD0D Conditional")] : []);
@@ -13951,7 +13995,6 @@ function renderStudioStatsTab(ctrl, compScope, tpl, saveTemplatePatch, forceRedr
           checked: cfg.enabled,
           ariaLabel: `Toggle ${cfg.label}`,
           onChange: (on) => {
-            const core = { ...tpl.coreTrackers ?? {} };
             const toggleMap = {
               player_attire: "trackPlayerAttire",
               player_condition: "trackPlayerCondition",
@@ -13963,8 +14006,11 @@ function renderStudioStatsTab(ctrl, compScope, tpl, saveTemplatePatch, forceRedr
               npc_conditions: "trackNpcConditions",
               npc_secrets: "trackNpcSecrets"
             };
-            core[toggleMap[item.id]] = on;
-            saveTemplatePatch({ coreTrackers: core });
+            saveTemplatePatch((live) => {
+              const core = { ...live.coreTrackers ?? {} };
+              core[toggleMap[item.id]] = on;
+              return { coreTrackers: core };
+            });
           }
         });
         left.append(swSlot, el("strong", "", `${cfg.icon || "\uD83D\uDCCA"} ${cfg.label}`), el("span", "ls-chip", "Built-In"), ...cfg.locked ? [el("span", "ls-chip", "\uD83D\uDD12")] : []);
@@ -14001,14 +14047,17 @@ function renderStudioStatsTab(ctrl, compScope, tpl, saveTemplatePatch, forceRedr
           checked: field.enabled,
           ariaLabel: `Toggle ${field.label}`,
           onChange: (on) => {
-            field.enabled = on;
-            saveTemplatePatch({ dossierFields: tpl.dossierFields });
+            saveTemplatePatch((live) => ({
+              dossierFields: live.dossierFields.map((x) => x.id === field.id ? { ...x, enabled: on } : x)
+            }));
           }
         });
         left.append(swSlot, el("strong", "", `${field.icon} ${field.label}`), el("span", "ls-chip", `Dossier · ${field.displayStyle || "card"}`));
         const right = el("div", "ls-row");
         right.append(btn("Full Edit", () => openDossierFieldModal(ctrl, field), "ls-btn-sm"), iconBtn("trash", () => {
-          saveTemplatePatch({ dossierFields: tpl.dossierFields.filter((x) => x.id !== field.id) });
+          saveTemplatePatch((live) => ({
+            dossierFields: live.dossierFields.filter((x) => x.id !== field.id)
+          }));
         }, { className: "ls-btn-sm ls-btn-icon ls-btn-ghost ls-btn-danger", title: "Delete field" }));
         row.append(left, right);
         dfCard.append(row);
@@ -14056,16 +14105,27 @@ function renderStudioSurfacesTab(ctrl, compScope, tpl, saveTemplatePatch, forceR
       mountNativeCheckbox(ctrl, compScope, slot, {
         checked: tpl.surfaces[fKey] !== false,
         label: fLbl,
-        onChange: (on) => saveTemplatePatch({ surfaces: { ...tpl.surfaces, [fKey]: on } })
+        onChange: (on) => saveTemplatePatch((live) => ({ surfaces: { ...live.surfaces, [fKey]: on } }))
       });
       featureGrid.append(slot);
     }
     featureCard.append(featureGrid);
     wrap.append(featureCard);
-    const buildSurfaceTabEditor = (title, tabs, onCommit) => {
+    const buildSurfaceTabEditor = (title, surfaceKey, tabs) => {
       const card = el("section", "ls-card");
       card.append(el("h3", "", title));
       const sorted = [...tabs].sort((a, b) => a.order - b.order);
+      const commitTabs = (updater) => {
+        saveTemplatePatch((live) => {
+          const curSorted = [...live.surfaces[surfaceKey]].sort((a, b) => a.order - b.order);
+          return {
+            surfaces: {
+              ...live.surfaces,
+              [surfaceKey]: updater(curSorted)
+            }
+          };
+        });
+      };
       sorted.forEach((tab, idx) => {
         const row = el("div", "ls-stat-row-compact");
         const left = el("div", "ls-row");
@@ -14074,23 +14134,22 @@ function renderStudioSurfacesTab(ctrl, compScope, tpl, saveTemplatePatch, forceR
           checked: tab.enabled,
           ariaLabel: `Toggle ${tab.label}`,
           onChange: (on) => {
-            tab.enabled = on;
-            onCommit(sorted);
+            commitTabs((liveTabs) => liveTabs.map((t) => t.id === tab.id ? { ...t, enabled: on } : t));
           }
         });
         const iconInp = el("input", "ls-input");
         iconInp.style.cssText = "width:44px;min-height:28px;padding:2px 6px;";
         iconInp.value = tab.icon;
         iconInp.addEventListener("change", () => {
-          tab.icon = iconInp.value.trim() || "\uD83D\uDCCA";
-          onCommit(sorted);
+          const nextIcon = iconInp.value.trim() || "\uD83D\uDCCA";
+          commitTabs((liveTabs) => liveTabs.map((t) => t.id === tab.id ? { ...t, icon: nextIcon } : t));
         });
         const lblInp = el("input", "ls-input");
         lblInp.style.cssText = "width:130px;min-height:28px;padding:2px 8px;";
         lblInp.value = tab.label;
         lblInp.addEventListener("change", () => {
-          tab.label = lblInp.value.trim() || tab.label;
-          onCommit(sorted);
+          const nextLabel = lblInp.value.trim() || tab.label;
+          commitTabs((liveTabs) => liveTabs.map((t) => t.id === tab.id ? { ...t, label: nextLabel } : t));
         });
         const kindSlot = el("div");
         mountThemedSelect(ctrl, compScope, kindSlot, {
@@ -14106,34 +14165,37 @@ function renderStudioSurfacesTab(ctrl, compScope, tpl, saveTemplatePatch, forceR
             { value: "custom", label: "Custom Tab" }
           ],
           onChange: (nextKind) => {
-            tab.kind = nextKind;
-            onCommit(sorted);
+            commitTabs((liveTabs) => liveTabs.map((t) => t.id === tab.id ? { ...t, kind: nextKind } : t));
           }
         });
         left.append(swSlot, iconInp, lblInp, kindSlot);
         const right = el("div", "ls-row");
         if (idx > 0) {
           right.append(btn("↑", () => {
-            const nextList = [...sorted];
-            [nextList[idx - 1], nextList[idx]] = [nextList[idx], nextList[idx - 1]];
-            nextList.forEach((t, i) => {
-              t.order = i;
+            commitTabs((liveTabs) => {
+              const curIdx = liveTabs.findIndex((t) => t.id === tab.id);
+              if (curIdx <= 0)
+                return liveTabs;
+              const nextList = [...liveTabs];
+              [nextList[curIdx - 1], nextList[curIdx]] = [nextList[curIdx], nextList[curIdx - 1]];
+              return nextList.map((t, i) => ({ ...t, order: i }));
             });
-            onCommit(nextList);
           }, "ls-btn-sm ls-btn-icon ls-btn-ghost"));
         }
         if (idx < sorted.length - 1) {
           right.append(btn("↓", () => {
-            const nextList = [...sorted];
-            [nextList[idx], nextList[idx + 1]] = [nextList[idx + 1], nextList[idx]];
-            nextList.forEach((t, i) => {
-              t.order = i;
+            commitTabs((liveTabs) => {
+              const curIdx = liveTabs.findIndex((t) => t.id === tab.id);
+              if (curIdx < 0 || curIdx >= liveTabs.length - 1)
+                return liveTabs;
+              const nextList = [...liveTabs];
+              [nextList[curIdx], nextList[curIdx + 1]] = [nextList[curIdx + 1], nextList[curIdx]];
+              return nextList.map((t, i) => ({ ...t, order: i }));
             });
-            onCommit(nextList);
           }, "ls-btn-sm ls-btn-icon ls-btn-ghost"));
         }
         if (sorted.length > 1) {
-          right.append(iconBtn("trash", () => onCommit(sorted.filter((t) => t.id !== tab.id)), {
+          right.append(iconBtn("trash", () => commitTabs((liveTabs) => liveTabs.filter((t) => t.id !== tab.id)), {
             className: "ls-btn-sm ls-btn-icon ls-btn-ghost ls-btn-danger",
             title: "Delete tab"
           }));
@@ -14152,20 +14214,23 @@ function renderStudioSurfacesTab(ctrl, compScope, tpl, saveTemplatePatch, forceR
         const lbl = newLbl.value.trim();
         if (!lbl)
           return;
-        sorted.push({
-          id: slugifyKey(lbl, `tab_${sorted.length + 1}`),
-          label: lbl,
-          icon: newIcon.value.trim() || "✨",
-          kind: "custom",
-          enabled: true,
-          order: sorted.length
-        });
-        onCommit(sorted);
+        const icon = newIcon.value.trim() || "✨";
+        commitTabs((liveTabs) => [
+          ...liveTabs,
+          {
+            id: slugifyKey(lbl, `tab_${liveTabs.length + 1}`),
+            label: lbl,
+            icon,
+            kind: "custom",
+            enabled: true,
+            order: liveTabs.length
+          }
+        ]);
       }, { label: "Add Tab", className: "ls-btn-sm ls-btn-primary" }));
       card.append(addRow);
       return card;
     };
-    wrap.append(buildSurfaceTabEditor("Floating HUD Widget Tabs", tpl.surfaces.widgetTabs, (nextTabs) => saveTemplatePatch({ surfaces: { ...tpl.surfaces, widgetTabs: nextTabs } })), buildSurfaceTabEditor("Inline Message Ribbon Tabs", tpl.surfaces.inlineTabs, (nextTabs) => saveTemplatePatch({ surfaces: { ...tpl.surfaces, inlineTabs: nextTabs } })));
+    wrap.append(buildSurfaceTabEditor("Floating HUD Widget Tabs", "widgetTabs", tpl.surfaces.widgetTabs), buildSurfaceTabEditor("Inline Message Ribbon Tabs", "inlineTabs", tpl.surfaces.inlineTabs));
   } else if (activeExtremeSubTab === "dossier") {
     const dosCard = el("section", "ls-card");
     dosCard.append(el("h3", "", "Character Dossier Tabs"));
@@ -14174,56 +14239,66 @@ function renderStudioSurfacesTab(ctrl, compScope, tpl, saveTemplatePatch, forceR
       const box = el("div", "ls-stat-cell");
       const top = el("div", "ls-row-between");
       const left = el("div", "ls-row");
+      const commitDosTabs = (updater) => {
+        saveTemplatePatch((live) => {
+          const curSorted = [...live.surfaces.dossierTabs].sort((a, b) => a.order - b.order);
+          return {
+            surfaces: {
+              ...live.surfaces,
+              dossierTabs: updater(curSorted)
+            }
+          };
+        });
+      };
       const swSlot = el("div");
       mountNativeSwitch(ctrl, compScope, swSlot, {
         checked: dTab.enabled,
         onChange: (on) => {
-          dTab.enabled = on;
-          saveTemplatePatch({ surfaces: { ...tpl.surfaces, dossierTabs: sortedDos } });
+          commitDosTabs((liveTabs) => liveTabs.map((x) => x.id === dTab.id ? { ...x, enabled: on } : x));
         }
       });
       const icInp = el("input", "ls-input");
       icInp.style.cssText = "width:44px;min-height:28px;padding:2px 6px;";
       icInp.value = dTab.icon;
       icInp.addEventListener("change", () => {
-        dTab.icon = icInp.value.trim() || "\uD83E\uDEAA";
-        saveTemplatePatch({ surfaces: { ...tpl.surfaces, dossierTabs: sortedDos } });
+        const nextIcon = icInp.value.trim() || "\uD83E\uDEAA";
+        commitDosTabs((liveTabs) => liveTabs.map((x) => x.id === dTab.id ? { ...x, icon: nextIcon } : x));
       });
       const lbInp = el("input", "ls-input");
       lbInp.style.cssText = "width:150px;min-height:28px;padding:2px 8px;";
       lbInp.value = dTab.label;
       lbInp.addEventListener("change", () => {
-        dTab.label = lbInp.value.trim() || dTab.label;
-        saveTemplatePatch({ surfaces: { ...tpl.surfaces, dossierTabs: sortedDos } });
+        const nextLabel = lbInp.value.trim() || dTab.label;
+        commitDosTabs((liveTabs) => liveTabs.map((x) => x.id === dTab.id ? { ...x, label: nextLabel } : x));
       });
       left.append(swSlot, icInp, lbInp);
       const right = el("div", "ls-row");
       if (idx > 0) {
         right.append(btn("↑", () => {
-          const nextList = [...sortedDos];
-          [nextList[idx - 1], nextList[idx]] = [nextList[idx], nextList[idx - 1]];
-          nextList.forEach((t, i) => {
-            t.order = i;
+          commitDosTabs((liveTabs) => {
+            const curIdx = liveTabs.findIndex((x) => x.id === dTab.id);
+            if (curIdx <= 0)
+              return liveTabs;
+            const nextList = [...liveTabs];
+            [nextList[curIdx - 1], nextList[curIdx]] = [nextList[curIdx], nextList[curIdx - 1]];
+            return nextList.map((t, i) => ({ ...t, order: i }));
           });
-          saveTemplatePatch({ surfaces: { ...tpl.surfaces, dossierTabs: nextList } });
         }, "ls-btn-sm ls-btn-icon ls-btn-ghost"));
       }
       if (idx < sortedDos.length - 1) {
         right.append(btn("↓", () => {
-          const nextList = [...sortedDos];
-          [nextList[idx], nextList[idx + 1]] = [nextList[idx + 1], nextList[idx]];
-          nextList.forEach((t, i) => {
-            t.order = i;
+          commitDosTabs((liveTabs) => {
+            const curIdx = liveTabs.findIndex((x) => x.id === dTab.id);
+            if (curIdx < 0 || curIdx >= liveTabs.length - 1)
+              return liveTabs;
+            const nextList = [...liveTabs];
+            [nextList[curIdx], nextList[curIdx + 1]] = [nextList[curIdx + 1], nextList[curIdx]];
+            return nextList.map((t, i) => ({ ...t, order: i }));
           });
-          saveTemplatePatch({ surfaces: { ...tpl.surfaces, dossierTabs: nextList } });
         }, "ls-btn-sm ls-btn-icon ls-btn-ghost"));
       }
       if (sortedDos.length > 1) {
-        right.append(iconBtn("trash", () => {
-          saveTemplatePatch({
-            surfaces: { ...tpl.surfaces, dossierTabs: sortedDos.filter((x) => x.id !== dTab.id) }
-          });
-        }, { className: "ls-btn-sm ls-btn-icon ls-btn-ghost ls-btn-danger", title: "Delete dossier tab" }));
+        right.append(iconBtn("trash", () => commitDosTabs((liveTabs) => liveTabs.filter((x) => x.id !== dTab.id)), { className: "ls-btn-sm ls-btn-icon ls-btn-ghost ls-btn-danger", title: "Delete dossier tab" }));
       }
       top.append(left, right);
       box.append(top);
@@ -14240,8 +14315,7 @@ function renderStudioSurfacesTab(ctrl, compScope, tpl, saveTemplatePatch, forceR
           checked: Boolean(dTab[prop]),
           label: lbl,
           onChange: (on) => {
-            dTab[prop] = on;
-            saveTemplatePatch({ surfaces: { ...tpl.surfaces, dossierTabs: sortedDos } });
+            commitDosTabs((liveTabs) => liveTabs.map((x) => x.id === dTab.id ? { ...x, [prop]: on } : x));
           }
         });
         secRow.append(slot);
@@ -14260,20 +14334,24 @@ function renderStudioSurfacesTab(ctrl, compScope, tpl, saveTemplatePatch, forceR
       const lbl = newDosLbl.value.trim();
       if (!lbl)
         return;
-      const created = {
-        id: slugifyKey(lbl, `dtab_${sortedDos.length + 1}`),
-        label: lbl,
-        icon: newDosIcon.value.trim() || "✨",
-        kind: "custom",
-        enabled: true,
-        order: sortedDos.length,
-        showMeters: true,
-        showFields: true,
-        showSecrets: false,
-        showAudit: false,
-        showNpcBonds: false
-      };
-      saveTemplatePatch({ surfaces: { ...tpl.surfaces, dossierTabs: [...sortedDos, created] } });
+      const icon = newDosIcon.value.trim() || "✨";
+      saveTemplatePatch((live) => {
+        const curDos = [...live.surfaces.dossierTabs].sort((a, b) => a.order - b.order);
+        const created = {
+          id: slugifyKey(lbl, `dtab_${curDos.length + 1}`),
+          label: lbl,
+          icon,
+          kind: "custom",
+          enabled: true,
+          order: curDos.length,
+          showMeters: true,
+          showFields: true,
+          showSecrets: false,
+          showAudit: false,
+          showNpcBonds: false
+        };
+        return { surfaces: { ...live.surfaces, dossierTabs: [...curDos, created] } };
+      });
     }, { label: "Add Dossier Tab", className: "ls-btn-sm ls-btn-primary" }));
     dosCard.append(addDosRow);
     wrap.append(dosCard);
@@ -14306,10 +14384,13 @@ function renderStudioSurfacesTab(ctrl, compScope, tpl, saveTemplatePatch, forceR
           checked: Boolean(s.showIn?.[vKey]),
           label: vLbl,
           onChange: (on) => {
-            s.showIn = { ...s.showIn, [vKey]: on };
-            if (vKey === "pinnedHeader")
-              s.pinnedToHeader = on;
-            saveTemplatePatch({ stats: tpl.stats });
+            saveTemplatePatch((live) => ({
+              stats: live.stats.map((st) => st.id === s.id ? {
+                ...st,
+                showIn: { ...st.showIn, [vKey]: on },
+                ...vKey === "pinnedHeader" ? { pinnedToHeader: on } : {}
+              } : st)
+            }));
           }
         });
         visCluster.append(slot);
@@ -14321,8 +14402,9 @@ function renderStudioSurfacesTab(ctrl, compScope, tpl, saveTemplatePatch, forceR
         ariaLabel: "Widget Tab",
         options: tpl.surfaces.widgetTabs.map((wt) => ({ value: wt.id, label: `Widget: ${wt.label}` })),
         onChange: (nextW) => {
-          s.widgetTabId = nextW;
-          saveTemplatePatch({ stats: tpl.stats });
+          saveTemplatePatch((live) => ({
+            stats: live.stats.map((st) => st.id === s.id ? { ...st, widgetTabId: nextW } : st)
+          }));
         }
       });
       const iSlot = el("div");
@@ -14332,8 +14414,9 @@ function renderStudioSurfacesTab(ctrl, compScope, tpl, saveTemplatePatch, forceR
         ariaLabel: "Inline Tab",
         options: tpl.surfaces.inlineTabs.map((it) => ({ value: it.id, label: `Inline: ${it.label}` })),
         onChange: (nextI) => {
-          s.inlineTabId = nextI;
-          saveTemplatePatch({ stats: tpl.stats });
+          saveTemplatePatch((live) => ({
+            stats: live.stats.map((st) => st.id === s.id ? { ...st, inlineTabId: nextI } : st)
+          }));
         }
       });
       const dSlot = el("div");
@@ -14343,8 +14426,9 @@ function renderStudioSurfacesTab(ctrl, compScope, tpl, saveTemplatePatch, forceR
         ariaLabel: "Dossier Tab",
         options: sortedDos.map((dt) => ({ value: dt.id, label: `Dossier: ${dt.label}` })),
         onChange: (nextD) => {
-          s.dossierTabId = nextD;
-          saveTemplatePatch({ stats: tpl.stats });
+          saveTemplatePatch((live) => ({
+            stats: live.stats.map((st) => st.id === s.id ? { ...st, dossierTabId: nextD } : st)
+          }));
         }
       });
       visCluster.append(wSlot, iSlot, dSlot);
@@ -14371,8 +14455,12 @@ function renderStudioSurfacesTab(ctrl, compScope, tpl, saveTemplatePatch, forceR
         checked: tpl.theme.showSceneChips[k],
         label: lbl,
         onChange: (on) => {
-          tpl.theme.showSceneChips[k] = on;
-          saveTemplatePatch({ theme: tpl.theme });
+          saveTemplatePatch((live) => ({
+            theme: {
+              ...live.theme,
+              showSceneChips: { ...live.theme.showSceneChips, [k]: on }
+            }
+          }));
         }
       });
       chipsGrid.append(slot);
@@ -14391,14 +14479,14 @@ function renderStudioSurfacesTab(ctrl, compScope, tpl, saveTemplatePatch, forceR
     dHtml.placeholder = "Custom Character Dossier HTML Banner…";
     dHtml.value = tpl.surfaces.customDossierHtml || "";
     htmlCard.append(wHtml, iHtml, dHtml, btn("Apply Custom HTML Banners", () => {
-      saveTemplatePatch({
+      saveTemplatePatch((live) => ({
         surfaces: {
-          ...tpl.surfaces,
+          ...live.surfaces,
           customWidgetHtml: wHtml.value.trim(),
           customInlineHtml: iHtml.value.trim(),
           customDossierHtml: dHtml.value.trim()
         }
-      });
+      }));
     }, "ls-btn-sm ls-btn-primary"));
     wrap.append(htmlCard);
   }
@@ -14922,8 +15010,9 @@ function renderFullWindowStudio(ctrl, compScope, onClose, isFullscreenOverlay, f
     identityDraft = null;
   }
   const isBuiltin = ctrl.builtinTemplates.some((b) => b.id === tpl.id);
-  const saveTemplatePatch = (patch, reason = "Updated template") => {
-    const liveTpl = ctrl.snapshot.template;
+  const saveTemplatePatch = (patchOrUpdater, reason = "Updated template") => {
+    const liveTpl = structuredClone(ctrl.snapshot.template);
+    const patch = typeof patchOrUpdater === "function" ? patchOrUpdater(liveTpl) : patchOrUpdater;
     const mergedPatch = {
       ...patch,
       ...patch.theme ? { theme: { ...liveTpl.theme, ...patch.theme } } : {},

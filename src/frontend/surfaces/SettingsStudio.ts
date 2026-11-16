@@ -207,8 +207,14 @@ function renderFullWindowStudio(
   }
   const isBuiltin = ctrl.builtinTemplates.some(b => b.id === tpl.id);
 
-  const saveTemplatePatch = (patch: Partial<LumiStatsTemplate>, reason = 'Updated template') => {
-    const liveTpl = ctrl.snapshot.template;
+  const saveTemplatePatch = (
+    patchOrUpdater:
+      | Partial<LumiStatsTemplate>
+      | ((live: LumiStatsTemplate) => Partial<LumiStatsTemplate>),
+    reason = 'Updated template',
+  ) => {
+    const liveTpl = structuredClone(ctrl.snapshot.template);
+    const patch = typeof patchOrUpdater === 'function' ? patchOrUpdater(liveTpl) : patchOrUpdater;
     const mergedPatch: Partial<LumiStatsTemplate> = {
       ...patch,
       ...(patch.theme

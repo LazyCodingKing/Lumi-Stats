@@ -169,6 +169,102 @@ export class LumiStatsService {
     );
   }
 
+  private reconcileStateWithTemplate(
+    nextState: CampaignState,
+    template: LumiStatsTemplate,
+    statRenames: Array<{ fromId: string; toId: string }> = [],
+  ): void {
+    for (const rename of statRenames) {
+      const fromId = rename?.fromId?.trim();
+      const toId = rename?.toId?.trim();
+      if (!fromId || !toId || fromId === toId) continue;
+
+      if (nextState.stats[fromId] && !nextState.stats[toId]) {
+        nextState.stats[toId] = { ...nextState.stats[fromId]!, id: toId };
+      }
+      delete nextState.stats[fromId];
+
+      for (const actor of Object.values(nextState.characters)) {
+        if (actor.meters[fromId] && !actor.meters[toId]) {
+          actor.meters[toId] = { ...actor.meters[fromId]! };
+        }
+        delete actor.meters[fromId];
+      }
+
+      for (const mod of nextState.modifiers) {
+        if (mod.statId === fromId) mod.statId = toId;
+      }
+      for (const entry of nextState.auditLog) {
+        if (entry.statId === fromId) entry.statId = toId;
+      }
+    }
+
+    const activeNonCharIds = new Set(
+      template.stats.filter(s => s.scope !== 'character').map(s => s.id),
+    );
+    const activeCharIds = new Set(
+      template.stats.filter(s => s.scope === 'character').map(s => s.id),
+    );
+
+    for (const key of Object.keys(nextState.stats)) {
+      if (!activeNonCharIds.has(key)) delete nextState.stats[key];
+    }
+    for (const actor of Object.values(nextState.characters)) {
+      for (const key of Object.keys(actor.meters)) {
+        if (!activeCharIds.has(key)) delete actor.meters[key];
+      }
+    }
+
+    for (const def of template.stats) {
+      if (!def.enabled) continue;
+      const isTextDef =
+        def.kind === 'text' ||
+        def.kind === 'tags' ||
+        def.kind === 'tier' ||
+        def.kind === 'skill_tree' ||
+        def.kind === 'xp_level' ||
+        def.kind === 'attributes' ||
+        def.kind === 'inventory' ||
+        def.kind === 'status_fx' ||
+        Boolean(def.displayStyle && def.displayStyle !== 'auto');
+
+      if (def.scope === 'character') {
+        for (const actor of Object.values(nextState.characters)) {
+          const curM = actor.meters[def.id];
+          if (!curM) {
+            actor.meters[def.id] = {
+              value: def.defaultValue,
+              calibrated: false,
+              locked: def.locked,
+            };
+          } else if (isTextDef && typeof curM.value === 'number') {
+            curM.value = typeof def.defaultValue === 'string' ? def.defaultValue : String(curM.value);
+          }
+        }
+        continue;
+      }
+
+      const existing = nextState.stats[def.id];
+      if (!existing) {
+        nextState.stats[def.id] = {
+          id: def.id,
+          scope: def.scope,
+          value: def.defaultValue,
+          calibrated: false,
+          locked: def.locked,
+        };
+      } else {
+        existing.scope = def.scope;
+        existing.locked = def.locked;
+        if (isTextDef && typeof existing.value === 'number') {
+          existing.value = typeof def.defaultValue === 'string' ? def.defaultValue : String(existing.value);
+        } else if (!isTextDef && typeof existing.value === 'number') {
+          existing.value = Math.max(def.min, Math.min(def.max, existing.value));
+        }
+      }
+    }
+  }
+
   private async syncCampaignStatsToTemplate(
     userId: string | undefined,
     chatId: string,
@@ -180,54 +276,7 @@ export class LumiStatsService {
     await this.storage.queue(resolvedUser, chatId, async () => {
       const snap = await this.storage.loadCampaign(resolvedUser, chatId);
       const nextState = structuredClone(snap.state);
-      for (const def of template.stats) {
-        if (!def.enabled) continue;
-        const isTextDef =
-          def.kind === 'text' ||
-          def.kind === 'tags' ||
-          def.kind === 'tier' ||
-          def.kind === 'skill_tree' ||
-          def.kind === 'xp_level' ||
-          def.kind === 'attributes' ||
-          def.kind === 'inventory' ||
-          def.kind === 'status_fx' ||
-          Boolean(def.displayStyle && def.displayStyle !== 'auto');
-
-        if (def.scope === 'character') {
-          for (const actor of Object.values(nextState.characters)) {
-            const curM = actor.meters[def.id];
-            if (!curM) {
-              actor.meters[def.id] = {
-                value: def.defaultValue,
-                calibrated: false,
-                locked: def.locked,
-              };
-            } else if (isTextDef && typeof curM.value === 'number') {
-              curM.value = typeof def.defaultValue === 'string' ? def.defaultValue : String(curM.value);
-            }
-          }
-          continue;
-        }
-
-        const existing = nextState.stats[def.id];
-        if (!existing) {
-          nextState.stats[def.id] = {
-            id: def.id,
-            scope: def.scope,
-            value: def.defaultValue,
-            calibrated: false,
-            locked: def.locked,
-          };
-        } else {
-          existing.scope = def.scope;
-          existing.locked = def.locked;
-          if (isTextDef && typeof existing.value === 'number') {
-            existing.value = typeof def.defaultValue === 'string' ? def.defaultValue : String(existing.value);
-          } else if (!isTextDef && typeof existing.value === 'number') {
-            existing.value = Math.max(def.min, Math.min(def.max, existing.value));
-          }
-        }
-      }
+      this.reconcileStateWithTemplate(nextState, template);
       recomputeDerivedStats(template.stats, nextState, template.categories ?? []);
       await this.storage.commitCampaign(resolvedUser, chatId, snap.state, nextState, reason);
     });
@@ -714,41 +763,10 @@ export class LumiStatsService {
               await this.storage.upsertCustomTemplateInLibrary(userId, nextTemplate);
             }
 
-            for (const def of nextTemplate.stats) {
-              if (!def.enabled) continue;
-              const isTextDef =
-                def.kind === 'text' ||
-                def.kind === 'tags' ||
-                def.kind === 'tier' ||
-                Boolean(def.displayStyle && def.displayStyle !== 'auto');
-              if (def.scope === 'character') {
-                for (const actor of Object.values(nextState.characters)) {
-                  const curM = actor.meters[def.id];
-                  if (!curM) {
-                    actor.meters[def.id] = {
-                      value: def.defaultValue,
-                      calibrated: false,
-                      locked: def.locked,
-                    };
-                  } else if (isTextDef && typeof curM.value === 'number') {
-                    curM.value = typeof def.defaultValue === 'string' ? def.defaultValue : String(curM.value);
-                  }
-                }
-              } else {
-                const curS = nextState.stats[def.id];
-                if (!curS) {
-                  nextState.stats[def.id] = {
-                    id: def.id,
-                    scope: def.scope,
-                    value: def.defaultValue,
-                    calibrated: false,
-                    locked: def.locked,
-                  };
-                } else if (isTextDef && typeof curS.value === 'number') {
-                  curS.value = typeof def.defaultValue === 'string' ? def.defaultValue : String(curS.value);
-                }
-              }
-            }
+            const statRenames = Array.isArray(payload.statRenames)
+              ? (payload.statRenames as Array<{ fromId: string; toId: string }>)
+              : [];
+            this.reconcileStateWithTemplate(nextState, nextTemplate, statRenames);
           }
 
           if (payload.patch && typeof payload.patch === 'object') {
@@ -1147,7 +1165,21 @@ export class LumiStatsService {
     ).frontendCapabilities?.declare('message_tag_interceptor');
     if (releaseTagCap) this.disposers.push(releaseTagCap);
 
-    void this.storage.loadSettings().then(() => this.syncObfuscatorDisplayRegex(undefined)).catch(() => undefined);
+    void this.storage
+      .loadSettings()
+      .then(async () => {
+        await this.syncObfuscatorDisplayRegex(undefined);
+        if (this.api.permissions.has('chats')) {
+          const active = await (
+            this.api.chats.getActive as (u?: string) => Promise<{ id?: string } | null>
+          )(undefined).catch(() => null);
+          if (active?.id) {
+            this.rememberActiveChat(undefined, active.id);
+            await this.storage.loadCampaign(undefined, active.id);
+          }
+        }
+      })
+      .catch(() => undefined);
 
     this.disposers.push(
       this.api.onFrontendMessage((rawPayload, userId, frontendSessionId) => {
@@ -1303,13 +1335,35 @@ export class LumiStatsService {
           }
         }
 
-        const cleanedMessages = messages.map(m => {
-          if (!m || m.role === 'system' || typeof m.content !== 'string') return m;
-          let txt = stripInlineStatsTags(m.content);
+        const cleanTextSegment = (raw: string): string => {
+          let txt = stripInlineStatsTags(raw);
           if (settings.cleanBraille && hasBrailleOrWhitespaceArtifacts(txt)) {
             txt = cleanBrailleAndProseWhitespace(txt);
           }
-          return txt !== m.content ? { ...m, content: txt } : m;
+          return txt;
+        };
+
+        const cleanedMessages = messages.map(m => {
+          if (!m || m.role === 'system') return m;
+          if (typeof m.content === 'string') {
+            const txt = cleanTextSegment(m.content);
+            return txt !== m.content ? { ...m, content: txt } : m;
+          }
+          if (Array.isArray(m.content)) {
+            let changed = false;
+            const nextParts = m.content.map(part => {
+              if (part && part.type === 'text' && typeof part.text === 'string') {
+                const txt = cleanTextSegment(part.text);
+                if (txt !== part.text) {
+                  changed = true;
+                  return { ...part, text: txt };
+                }
+              }
+              return part;
+            });
+            return changed ? { ...m, content: nextParts } : m;
+          }
+          return m;
         });
 
         let charBudget = Math.max(400, settings.tokenBudget * 4);
@@ -1350,15 +1404,28 @@ export class LumiStatsService {
           }
         }
 
-        const promptAlreadyHasContinuity = cleanedMessages.some(
-          m =>
-            typeof m?.content === 'string' &&
-            (m.content.includes('[Lumi Stats ·') ||
-              m.content.includes('Scene: [') ||
-              (continuity.text.length > 32 && m.content.includes(continuity.text.slice(0, 32)))),
-        );
-        const promptAlreadyHasProtocol = cleanedMessages.some(
-          m => typeof m?.content === 'string' && m.content.includes('<lumi_stats_protocol>'),
+        const getMessagePlainText = (m: (typeof cleanedMessages)[number]): string => {
+          if (!m) return '';
+          if (typeof m.content === 'string') return m.content;
+          if (Array.isArray(m.content)) {
+            return m.content
+              .filter(p => p && p.type === 'text' && typeof p.text === 'string')
+              .map(p => (p as { type: 'text'; text: string }).text)
+              .join('\n');
+          }
+          return '';
+        };
+
+        const promptAlreadyHasContinuity = cleanedMessages.some(m => {
+          const text = getMessagePlainText(m);
+          if (!text) return false;
+          return (
+            text.includes('[Lumi Stats ·') ||
+            (continuity.text.length > 0 && text.includes(continuity.text))
+          );
+        });
+        const promptAlreadyHasProtocol = cleanedMessages.some(m =>
+          getMessagePlainText(m).includes('<lumi_stats_protocol>'),
         );
 
         const shouldInjectContinuity =
@@ -1367,7 +1434,7 @@ export class LumiStatsService {
         const recentTextForGating = cleanedMessages
           .filter(m => m?.__isChatHistory)
           .slice(-4)
-          .map(m => (typeof m.content === 'string' ? m.content : ''))
+          .map(m => getMessagePlainText(m))
           .join('\n');
 
         const inlineContract =
@@ -1575,6 +1642,7 @@ export class LumiStatsService {
         const env = (o.env && typeof o.env === 'object' ? (o.env as Record<string, unknown>) : {}) as Record<string, unknown>;
         const envChat = (env.chat && typeof env.chat === 'object' ? (env.chat as Record<string, unknown>) : {}) as Record<string, unknown>;
         const rawUserId = typeof o.userId === 'string' ? o.userId : undefined;
+        const fallbackUser = this.resolveUserId(rawUserId);
         const chatId =
           String(
             o.chatId ??
@@ -1582,6 +1650,7 @@ export class LumiStatsService {
               envChat.id ??
               envChat.chatId ??
               this.lastActiveChatByUser.get(rawUserId?.trim() || '__owner__') ??
+              (fallbackUser ? this.lastActiveChatByUser.get(fallbackUser) : undefined) ??
               '',
           ).trim();
         const userId = this.resolveUserId(rawUserId, chatId);
@@ -1680,8 +1749,9 @@ export class LumiStatsService {
         returnType: 'string',
         volatile: true,
         handler: ((ctx: unknown) => {
-          const { state, template } = readSyncForMacro(ctx);
-          return `<lumi-stats>\n${buildCompactFormatExample(state, template, state.initialized)}\n</lumi-stats>`;
+          const { userId, state, template } = readSyncForMacro(ctx);
+          const verbosity = this.storage.getSettingsSync(userId).protocolVerbosity ?? 'compact';
+          return `<lumi-stats>\n${buildCompactFormatExample(state, template, state.initialized, '', { verbosity })}\n</lumi-stats>`;
         }) as unknown as string,
       });
 
@@ -1692,8 +1762,9 @@ export class LumiStatsService {
         returnType: 'string',
         volatile: true,
         handler: ((ctx: unknown) => {
-          const { state, template } = readSyncForMacro(ctx);
-          return `At the end of your reply, append the updated state wrapped in <lumi-stats>{...JSON...}</lumi-stats>:\n${compileExtractorPrompt(state, template)}`;
+          const { userId, state, template } = readSyncForMacro(ctx);
+          const verbosity = this.storage.getSettingsSync(userId).protocolVerbosity ?? 'compact';
+          return `At the end of your reply, append the updated state wrapped in <lumi-stats>{...JSON...}</lumi-stats>:\n${compileExtractorPrompt(state, template, '', { verbosity })}`;
         }) as unknown as string,
       });
 
@@ -1887,7 +1958,7 @@ export class LumiStatsService {
           if (!chatId) return null;
           const resolvedOwner = this.resolveUserId(ownerUser, chatId);
           const snap = await this.storage.loadCampaign(resolvedOwner, chatId);
-          return buildChatVariableProjection(snap.state);
+          return buildChatVariableProjection(snap.state, snap.template);
         },
         { requires: [] },
       );

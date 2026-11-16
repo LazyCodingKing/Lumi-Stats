@@ -1454,10 +1454,20 @@ export function openStatSchemaModal(
         ],
         onChange: v => {
           selectedStyle = v as StatDisplayStyle;
+          const preserveKinds = new Set([
+            'text',
+            'tags',
+            'tier',
+            'skill_tree',
+            'xp_level',
+            'attributes',
+            'inventory',
+            'status_fx',
+          ]);
           if (selectedStyle === 'pill_list') {
             selectedKind = 'tags';
             kindCtrl.setValue('tags');
-          } else if (selectedStyle !== 'auto' && !['text', 'tags', 'tier'].includes(selectedKind)) {
+          } else if (selectedStyle !== 'auto' && !preserveKinds.has(selectedKind)) {
             selectedKind = 'text';
             kindCtrl.setValue('text');
           }
@@ -1530,6 +1540,9 @@ export function openStatSchemaModal(
               selectedSpan = 'full';
               spanCtrl.setValue('full');
             }
+          }
+          if (['text', 'tags', 'tier'].includes(selectedKind) && defInp.value.trim() === '0') {
+            defInp.value = '';
           }
           syncRangeVisibility();
         },
@@ -1648,6 +1661,7 @@ export function openStatSchemaModal(
       const saveBtn = btn(existing ? 'Save Changes' : 'Create Stat', () => {
         const label = labelInp.value.trim();
         if (!label) return;
+        const liveTpl = structuredClone(ctrl.snapshot.template);
         const parsedMin = Number(minInp.value);
         const min = minInp.value.trim() !== '' && Number.isFinite(parsedMin) ? parsedMin : 0;
         const parsedMax = Number(maxInp.value);
@@ -1668,9 +1682,21 @@ export function openStatSchemaModal(
           .split(',')
           .map(k => k.trim().toLowerCase())
           .filter(Boolean);
+
+        let nextId = existing?.id;
+        const statRenames: Array<{ fromId: string; toId: string }> = [];
+        if (existing && label.toLowerCase() !== existing.label.trim().toLowerCase()) {
+          const candidateId = slugifyKey(label, existing.id);
+          const idTaken = liveTpl.stats.some(s => s.id === candidateId && s.id !== existing.id);
+          if (candidateId && candidateId !== existing.id && !idTaken) {
+            nextId = candidateId;
+            statRenames.push({ fromId: existing.id, toId: candidateId });
+          }
+        }
+
         const created = createStatSchema({
           ...existing,
-          id: existing?.id,
+          id: nextId,
           label,
           icon: iconInp.value.trim() || '📊',
           scope: selectedScope,
@@ -1711,12 +1737,15 @@ export function openStatSchemaModal(
           },
         });
 
-        const idx = tpl.stats.findIndex(s => s.id === created.id);
-        if (idx >= 0) tpl.stats[idx] = created;
-        else tpl.stats.push(created);
+        const oldIdx = existing ? liveTpl.stats.findIndex(s => s.id === existing.id) : -1;
+        const newIdx = liveTpl.stats.findIndex(s => s.id === created.id);
+        if (oldIdx >= 0) liveTpl.stats[oldIdx] = created;
+        else if (newIdx >= 0) liveTpl.stats[newIdx] = created;
+        else liveTpl.stats.push(created);
 
         void ctrl.request('state:mutate', {
-          templatePatch: { stats: tpl.stats },
+          templatePatch: { stats: liveTpl.stats },
+          ...(statRenames.length ? { statRenames } : {}),
           reason: `Saved stat schema "${created.label}"`,
         });
         close();

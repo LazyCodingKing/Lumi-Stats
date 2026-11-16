@@ -24,7 +24,12 @@ export function renderStudioSurfacesTab(
   ctrl: LumiFrontendController,
   compScope: ComponentScope,
   tpl: LumiStatsTemplate,
-  saveTemplatePatch: (patch: Partial<LumiStatsTemplate>, reason?: string) => void,
+  saveTemplatePatch: (
+    patch:
+      | Partial<LumiStatsTemplate>
+      | ((live: LumiStatsTemplate) => Partial<LumiStatsTemplate>),
+    reason?: string,
+  ) => void,
   forceRedraw: () => void,
 ): HTMLElement {
   const wrap = el('div', 'ls-stack');
@@ -57,7 +62,7 @@ export function renderStudioSurfacesTab(
       mountNativeCheckbox(ctrl, compScope, slot, {
         checked: tpl.surfaces[fKey] !== false,
         label: fLbl,
-        onChange: on => saveTemplatePatch({ surfaces: { ...tpl.surfaces, [fKey]: on } }),
+        onChange: on => saveTemplatePatch(live => ({ surfaces: { ...live.surfaces, [fKey]: on } })),
       });
       featureGrid.append(slot);
     }
@@ -66,12 +71,23 @@ export function renderStudioSurfacesTab(
 
     const buildSurfaceTabEditor = (
       title: string,
+      surfaceKey: 'widgetTabs' | 'inlineTabs',
       tabs: SurfaceTabConfig[],
-      onCommit: (nextTabs: SurfaceTabConfig[]) => void,
     ): HTMLElement => {
       const card = el('section', 'ls-card');
       card.append(el('h3', '', title));
       const sorted = [...tabs].sort((a, b) => a.order - b.order);
+      const commitTabs = (updater: (liveTabs: SurfaceTabConfig[]) => SurfaceTabConfig[]) => {
+        saveTemplatePatch(live => {
+          const curSorted = [...live.surfaces[surfaceKey]].sort((a, b) => a.order - b.order);
+          return {
+            surfaces: {
+              ...live.surfaces,
+              [surfaceKey]: updater(curSorted),
+            },
+          };
+        });
+      };
 
       sorted.forEach((tab, idx) => {
         const row = el('div', 'ls-stat-row-compact');
@@ -81,8 +97,7 @@ export function renderStudioSurfacesTab(
           checked: tab.enabled,
           ariaLabel: `Toggle ${tab.label}`,
           onChange: on => {
-            tab.enabled = on;
-            onCommit(sorted);
+            commitTabs(liveTabs => liveTabs.map(t => (t.id === tab.id ? { ...t, enabled: on } : t)));
           },
         });
 
@@ -90,16 +105,16 @@ export function renderStudioSurfacesTab(
         iconInp.style.cssText = 'width:44px;min-height:28px;padding:2px 6px;';
         iconInp.value = tab.icon;
         iconInp.addEventListener('change', () => {
-          tab.icon = iconInp.value.trim() || '📊';
-          onCommit(sorted);
+          const nextIcon = iconInp.value.trim() || '📊';
+          commitTabs(liveTabs => liveTabs.map(t => (t.id === tab.id ? { ...t, icon: nextIcon } : t)));
         });
 
         const lblInp = el('input', 'ls-input');
         lblInp.style.cssText = 'width:130px;min-height:28px;padding:2px 8px;';
         lblInp.value = tab.label;
         lblInp.addEventListener('change', () => {
-          tab.label = lblInp.value.trim() || tab.label;
-          onCommit(sorted);
+          const nextLabel = lblInp.value.trim() || tab.label;
+          commitTabs(liveTabs => liveTabs.map(t => (t.id === tab.id ? { ...t, label: nextLabel } : t)));
         });
 
         const kindSlot = el('div');
@@ -116,8 +131,11 @@ export function renderStudioSurfacesTab(
             { value: 'custom', label: 'Custom Tab' },
           ],
           onChange: nextKind => {
-            tab.kind = nextKind as SurfaceTabConfig['kind'];
-            onCommit(sorted);
+            commitTabs(liveTabs =>
+              liveTabs.map(t =>
+                t.id === tab.id ? { ...t, kind: nextKind as SurfaceTabConfig['kind'] } : t,
+              ),
+            );
           },
         });
 
@@ -127,29 +145,39 @@ export function renderStudioSurfacesTab(
         if (idx > 0) {
           right.append(
             btn('↑', () => {
-              const nextList = [...sorted];
-              [nextList[idx - 1], nextList[idx]] = [nextList[idx]!, nextList[idx - 1]!];
-              nextList.forEach((t, i) => { t.order = i; });
-              onCommit(nextList);
+              commitTabs(liveTabs => {
+                const curIdx = liveTabs.findIndex(t => t.id === tab.id);
+                if (curIdx <= 0) return liveTabs;
+                const nextList = [...liveTabs];
+                [nextList[curIdx - 1], nextList[curIdx]] = [nextList[curIdx]!, nextList[curIdx - 1]!];
+                return nextList.map((t, i) => ({ ...t, order: i }));
+              });
             }, 'ls-btn-sm ls-btn-icon ls-btn-ghost'),
           );
         }
         if (idx < sorted.length - 1) {
           right.append(
             btn('↓', () => {
-              const nextList = [...sorted];
-              [nextList[idx], nextList[idx + 1]] = [nextList[idx + 1]!, nextList[idx]!];
-              nextList.forEach((t, i) => { t.order = i; });
-              onCommit(nextList);
+              commitTabs(liveTabs => {
+                const curIdx = liveTabs.findIndex(t => t.id === tab.id);
+                if (curIdx < 0 || curIdx >= liveTabs.length - 1) return liveTabs;
+                const nextList = [...liveTabs];
+                [nextList[curIdx], nextList[curIdx + 1]] = [nextList[curIdx + 1]!, nextList[curIdx]!];
+                return nextList.map((t, i) => ({ ...t, order: i }));
+              });
             }, 'ls-btn-sm ls-btn-icon ls-btn-ghost'),
           );
         }
         if (sorted.length > 1) {
           right.append(
-            iconBtn('trash', () => onCommit(sorted.filter(t => t.id !== tab.id)), {
-              className: 'ls-btn-sm ls-btn-icon ls-btn-ghost ls-btn-danger',
-              title: 'Delete tab',
-            }),
+            iconBtn(
+              'trash',
+              () => commitTabs(liveTabs => liveTabs.filter(t => t.id !== tab.id)),
+              {
+                className: 'ls-btn-sm ls-btn-icon ls-btn-ghost ls-btn-danger',
+                title: 'Delete tab',
+              },
+            ),
           );
         }
         row.append(left, right);
@@ -171,15 +199,18 @@ export function renderStudioSurfacesTab(
           () => {
             const lbl = newLbl.value.trim();
             if (!lbl) return;
-            sorted.push({
-              id: slugifyKey(lbl, `tab_${sorted.length + 1}`),
-              label: lbl,
-              icon: newIcon.value.trim() || '✨',
-              kind: 'custom',
-              enabled: true,
-              order: sorted.length,
-            });
-            onCommit(sorted);
+            const icon = newIcon.value.trim() || '✨';
+            commitTabs(liveTabs => [
+              ...liveTabs,
+              {
+                id: slugifyKey(lbl, `tab_${liveTabs.length + 1}`),
+                label: lbl,
+                icon,
+                kind: 'custom',
+                enabled: true,
+                order: liveTabs.length,
+              },
+            ]);
           },
           { label: 'Add Tab', className: 'ls-btn-sm ls-btn-primary' },
         ),
@@ -189,12 +220,8 @@ export function renderStudioSurfacesTab(
     };
 
     wrap.append(
-      buildSurfaceTabEditor('Floating HUD Widget Tabs', tpl.surfaces.widgetTabs, nextTabs =>
-        saveTemplatePatch({ surfaces: { ...tpl.surfaces, widgetTabs: nextTabs } }),
-      ),
-      buildSurfaceTabEditor('Inline Message Ribbon Tabs', tpl.surfaces.inlineTabs, nextTabs =>
-        saveTemplatePatch({ surfaces: { ...tpl.surfaces, inlineTabs: nextTabs } }),
-      ),
+      buildSurfaceTabEditor('Floating HUD Widget Tabs', 'widgetTabs', tpl.surfaces.widgetTabs),
+      buildSurfaceTabEditor('Inline Message Ribbon Tabs', 'inlineTabs', tpl.surfaces.inlineTabs),
     );
   } else if (activeExtremeSubTab === 'dossier') {
     const dosCard = el('section', 'ls-card');
@@ -205,27 +232,38 @@ export function renderStudioSurfacesTab(
       const box = el('div', 'ls-stat-cell');
       const top = el('div', 'ls-row-between');
       const left = el('div', 'ls-row');
+      const commitDosTabs = (updater: (liveTabs: DossierTabConfig[]) => DossierTabConfig[]) => {
+        saveTemplatePatch(live => {
+          const curSorted = [...live.surfaces.dossierTabs].sort((a, b) => a.order - b.order);
+          return {
+            surfaces: {
+              ...live.surfaces,
+              dossierTabs: updater(curSorted),
+            },
+          };
+        });
+      };
+
       const swSlot = el('div');
       mountNativeSwitch(ctrl, compScope, swSlot, {
         checked: dTab.enabled,
         onChange: on => {
-          dTab.enabled = on;
-          saveTemplatePatch({ surfaces: { ...tpl.surfaces, dossierTabs: sortedDos } });
+          commitDosTabs(liveTabs => liveTabs.map(x => (x.id === dTab.id ? { ...x, enabled: on } : x)));
         },
       });
       const icInp = el('input', 'ls-input');
       icInp.style.cssText = 'width:44px;min-height:28px;padding:2px 6px;';
       icInp.value = dTab.icon;
       icInp.addEventListener('change', () => {
-        dTab.icon = icInp.value.trim() || '🪪';
-        saveTemplatePatch({ surfaces: { ...tpl.surfaces, dossierTabs: sortedDos } });
+        const nextIcon = icInp.value.trim() || '🪪';
+        commitDosTabs(liveTabs => liveTabs.map(x => (x.id === dTab.id ? { ...x, icon: nextIcon } : x)));
       });
       const lbInp = el('input', 'ls-input');
       lbInp.style.cssText = 'width:150px;min-height:28px;padding:2px 8px;';
       lbInp.value = dTab.label;
       lbInp.addEventListener('change', () => {
-        dTab.label = lbInp.value.trim() || dTab.label;
-        saveTemplatePatch({ surfaces: { ...tpl.surfaces, dossierTabs: sortedDos } });
+        const nextLabel = lbInp.value.trim() || dTab.label;
+        commitDosTabs(liveTabs => liveTabs.map(x => (x.id === dTab.id ? { ...x, label: nextLabel } : x)));
       });
       left.append(swSlot, icInp, lbInp);
 
@@ -233,20 +271,26 @@ export function renderStudioSurfacesTab(
       if (idx > 0) {
         right.append(
           btn('↑', () => {
-            const nextList = [...sortedDos];
-            [nextList[idx - 1], nextList[idx]] = [nextList[idx]!, nextList[idx - 1]!];
-            nextList.forEach((t, i) => { t.order = i; });
-            saveTemplatePatch({ surfaces: { ...tpl.surfaces, dossierTabs: nextList } });
+            commitDosTabs(liveTabs => {
+              const curIdx = liveTabs.findIndex(x => x.id === dTab.id);
+              if (curIdx <= 0) return liveTabs;
+              const nextList = [...liveTabs];
+              [nextList[curIdx - 1], nextList[curIdx]] = [nextList[curIdx]!, nextList[curIdx - 1]!];
+              return nextList.map((t, i) => ({ ...t, order: i }));
+            });
           }, 'ls-btn-sm ls-btn-icon ls-btn-ghost'),
         );
       }
       if (idx < sortedDos.length - 1) {
         right.append(
           btn('↓', () => {
-            const nextList = [...sortedDos];
-            [nextList[idx], nextList[idx + 1]] = [nextList[idx + 1]!, nextList[idx]!];
-            nextList.forEach((t, i) => { t.order = i; });
-            saveTemplatePatch({ surfaces: { ...tpl.surfaces, dossierTabs: nextList } });
+            commitDosTabs(liveTabs => {
+              const curIdx = liveTabs.findIndex(x => x.id === dTab.id);
+              if (curIdx < 0 || curIdx >= liveTabs.length - 1) return liveTabs;
+              const nextList = [...liveTabs];
+              [nextList[curIdx], nextList[curIdx + 1]] = [nextList[curIdx + 1]!, nextList[curIdx]!];
+              return nextList.map((t, i) => ({ ...t, order: i }));
+            });
           }, 'ls-btn-sm ls-btn-icon ls-btn-ghost'),
         );
       }
@@ -254,11 +298,7 @@ export function renderStudioSurfacesTab(
         right.append(
           iconBtn(
             'trash',
-            () => {
-              saveTemplatePatch({
-                surfaces: { ...tpl.surfaces, dossierTabs: sortedDos.filter(x => x.id !== dTab.id) },
-              });
-            },
+            () => commitDosTabs(liveTabs => liveTabs.filter(x => x.id !== dTab.id)),
             { className: 'ls-btn-sm ls-btn-icon ls-btn-ghost ls-btn-danger', title: 'Delete dossier tab' },
           ),
         );
@@ -279,8 +319,9 @@ export function renderStudioSurfacesTab(
           checked: Boolean(dTab[prop]),
           label: lbl,
           onChange: on => {
-            dTab[prop] = on;
-            saveTemplatePatch({ surfaces: { ...tpl.surfaces, dossierTabs: sortedDos } });
+            commitDosTabs(liveTabs =>
+              liveTabs.map(x => (x.id === dTab.id ? { ...x, [prop]: on } : x)),
+            );
           },
         });
         secRow.append(slot);
@@ -304,20 +345,24 @@ export function renderStudioSurfacesTab(
         () => {
           const lbl = newDosLbl.value.trim();
           if (!lbl) return;
-          const created: DossierTabConfig = {
-            id: slugifyKey(lbl, `dtab_${sortedDos.length + 1}`),
-            label: lbl,
-            icon: newDosIcon.value.trim() || '✨',
-            kind: 'custom',
-            enabled: true,
-            order: sortedDos.length,
-            showMeters: true,
-            showFields: true,
-            showSecrets: false,
-            showAudit: false,
-            showNpcBonds: false,
-          };
-          saveTemplatePatch({ surfaces: { ...tpl.surfaces, dossierTabs: [...sortedDos, created] } });
+          const icon = newDosIcon.value.trim() || '✨';
+          saveTemplatePatch(live => {
+            const curDos = [...live.surfaces.dossierTabs].sort((a, b) => a.order - b.order);
+            const created: DossierTabConfig = {
+              id: slugifyKey(lbl, `dtab_${curDos.length + 1}`),
+              label: lbl,
+              icon,
+              kind: 'custom',
+              enabled: true,
+              order: curDos.length,
+              showMeters: true,
+              showFields: true,
+              showSecrets: false,
+              showAudit: false,
+              showNpcBonds: false,
+            };
+            return { surfaces: { ...live.surfaces, dossierTabs: [...curDos, created] } };
+          });
         },
         { label: 'Add Dossier Tab', className: 'ls-btn-sm ls-btn-primary' },
       ),
@@ -361,9 +406,17 @@ export function renderStudioSurfacesTab(
           checked: Boolean(s.showIn?.[vKey]),
           label: vLbl,
           onChange: on => {
-            s.showIn = { ...s.showIn, [vKey]: on };
-            if (vKey === 'pinnedHeader') s.pinnedToHeader = on;
-            saveTemplatePatch({ stats: tpl.stats });
+            saveTemplatePatch(live => ({
+              stats: live.stats.map(st =>
+                st.id === s.id
+                  ? {
+                      ...st,
+                      showIn: { ...st.showIn, [vKey]: on },
+                      ...(vKey === 'pinnedHeader' ? { pinnedToHeader: on } : {}),
+                    }
+                  : st,
+              ),
+            }));
           },
         });
         visCluster.append(slot);
@@ -376,8 +429,9 @@ export function renderStudioSurfacesTab(
         ariaLabel: 'Widget Tab',
         options: tpl.surfaces.widgetTabs.map(wt => ({ value: wt.id, label: `Widget: ${wt.label}` })),
         onChange: nextW => {
-          s.widgetTabId = nextW;
-          saveTemplatePatch({ stats: tpl.stats });
+          saveTemplatePatch(live => ({
+            stats: live.stats.map(st => (st.id === s.id ? { ...st, widgetTabId: nextW } : st)),
+          }));
         },
       });
 
@@ -388,8 +442,9 @@ export function renderStudioSurfacesTab(
         ariaLabel: 'Inline Tab',
         options: tpl.surfaces.inlineTabs.map(it => ({ value: it.id, label: `Inline: ${it.label}` })),
         onChange: nextI => {
-          s.inlineTabId = nextI;
-          saveTemplatePatch({ stats: tpl.stats });
+          saveTemplatePatch(live => ({
+            stats: live.stats.map(st => (st.id === s.id ? { ...st, inlineTabId: nextI } : st)),
+          }));
         },
       });
 
@@ -400,8 +455,9 @@ export function renderStudioSurfacesTab(
         ariaLabel: 'Dossier Tab',
         options: sortedDos.map(dt => ({ value: dt.id, label: `Dossier: ${dt.label}` })),
         onChange: nextD => {
-          s.dossierTabId = nextD;
-          saveTemplatePatch({ stats: tpl.stats });
+          saveTemplatePatch(live => ({
+            stats: live.stats.map(st => (st.id === s.id ? { ...st, dossierTabId: nextD } : st)),
+          }));
         },
       });
 
@@ -436,8 +492,12 @@ export function renderStudioSurfacesTab(
         checked: tpl.theme.showSceneChips[k],
         label: lbl,
         onChange: on => {
-          tpl.theme.showSceneChips[k] = on;
-          saveTemplatePatch({ theme: tpl.theme });
+          saveTemplatePatch(live => ({
+            theme: {
+              ...live.theme,
+              showSceneChips: { ...live.theme.showSceneChips, [k]: on },
+            },
+          }));
         },
       });
       chipsGrid.append(slot);
@@ -464,14 +524,14 @@ export function renderStudioSurfacesTab(
       iHtml,
       dHtml,
       btn('Apply Custom HTML Banners', () => {
-        saveTemplatePatch({
+        saveTemplatePatch(live => ({
           surfaces: {
-            ...tpl.surfaces,
+            ...live.surfaces,
             customWidgetHtml: wHtml.value.trim(),
             customInlineHtml: iHtml.value.trim(),
             customDossierHtml: dHtml.value.trim(),
           },
-        });
+        }));
       }, 'ls-btn-sm ls-btn-primary'),
     );
     wrap.append(htmlCard);
