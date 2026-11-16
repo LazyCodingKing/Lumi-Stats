@@ -690,6 +690,7 @@ export interface LumiUserSettings {
   injectContinuity: boolean;
   tokenBudget: number;
   protocolVerbosity?: 'compact' | 'standard';
+  splitStaticProtocolForCache?: boolean;
   sidecarHistoryTurns?: number;
   sidecarMaxCharsPerMsg?: number;
   defaultTemplateId: string;

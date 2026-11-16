@@ -30,6 +30,7 @@ export const DEFAULT_USER_SETTINGS: Readonly<LumiUserSettings> = Object.freeze({
   injectContinuity: true,
   tokenBudget: 450,
   protocolVerbosity: 'compact',
+  splitStaticProtocolForCache: false,
   sidecarHistoryTurns: 4,
   sidecarMaxCharsPerMsg: 2500,
   defaultTemplateId: 'universal_companion',

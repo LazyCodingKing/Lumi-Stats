@@ -400,6 +400,14 @@ export class TrackerEngine {
 
       const reduced = applyTurnPatch(snapshot.state, template, patch, {
         incrementTurn: targetMsg.role === 'assistant',
+        ...(settings.sensitiveObfuscatorEnabled && (settings.sensitiveWords?.length ?? 0) > 0
+          ? {
+              obfuscationConfig: {
+                words: settings.sensitiveWords,
+                useOne: settings.obfuscateVowelsWithOne !== false,
+              },
+            }
+          : {}),
       });
 
       await this.linkCardPortraitIfAvailable(userId, chatId, reduced.state);

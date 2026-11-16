@@ -305,7 +305,8 @@ export function compileNarratorContinuity(
 
     for (const s of calibratedNonChar) {
       const rec = state.stats[s.id]!;
-      if (compactMode && (rec.value === 'None' || rec.value === '' || rec.value === 0)) continue;
+      if (rec.value === 'None' || rec.value === '') continue;
+      if (compactMode && rec.value === 0) continue;
       const resolvedLabel =
         !compactMode && typeof rec.value === 'number' && s.anchors.length > 0
           ? resolveAnchorLabel(s.anchors, rec.value)
@@ -360,33 +361,31 @@ export function compileNarratorContinuity(
             : '';
 
         if (!actor.present) {
-          const isTransientSceneStat = (id: string) =>
-            id === 'acted' || id === 'observation';
+          const isOffscreenSkipped = (id: string) =>
+            ['acted', 'observation', 'plan', 'mask', 'polarity', 'knowledge', 'oppurtunity'].includes(id);
           const compactMeters = charSchemas
-            .filter(s => !isTransientSceneStat(s.id))
+            .filter(s => !isOffscreenSkipped(s.id))
             .map(s => {
               const m = actor.meters[s.id];
               if (!m?.calibrated) return '';
-              if (compactMode && (m.value === 'None' || m.value === '')) return '';
+              if (m.value === 'None' || m.value === '') return '';
               const valStr =
                 typeof m.value === 'string'
-                  ? compactContinuityTextValue(s.id, m.value, Math.min(textCap, 90))
+                  ? compactContinuityTextValue(s.id, m.value, Math.min(textCap, 60))
                   : String(m.value);
               return `${s.id}=${valStr}`;
             })
             .filter(Boolean)
             .join(', ');
           const roleTxt = resolveCharacterFieldValue(actor, 'role_summary');
-          const carriedTxt = resolveCharacterFieldValue(actor, 'carried_items');
           const bondLabel = actor.bondToPlayer?.label?.trim() || '';
+          const showRole =
+            roleTxt &&
+            roleTxt !== 'Story Character' &&
+            !bondLabel;
           const parts = [
             bondLabel ? `toYou="${bondLabel}"` : '',
-            roleTxt && roleTxt.toLowerCase() !== bondLabel.toLowerCase()
-              ? `role="${compactContinuityTextValue('role', roleTxt, 50)}"`
-              : '',
-            carriedTxt && carriedTxt !== 'None'
-              ? `items="${compactContinuityTextValue('carried_items', carriedTxt, 60)}"`
-              : '',
+            showRole ? `role="${compactContinuityTextValue('role', roleTxt, 45)}"` : '',
             compactMeters,
             peerBonds ? `peers=[${peerBonds}]` : '',
           ].filter(Boolean);
@@ -397,8 +396,9 @@ export function compileNarratorContinuity(
         const meters = charSchemas
           .map(s => {
             const m = actor.meters[s.id];
-            if (!m?.calibrated) return compactMode ? '' : `${s.id}=?`;
-            if (compactMode && (m.value === 'None' || m.value === '')) return '';
+            if (!m?.calibrated) return '';
+            if (m.value === 'None' || m.value === '') return '';
+            if (compactMode && m.value === 0) return '';
             const valStr =
               typeof m.value === 'string'
                 ? compactContinuityTextValue(s.id, m.value, textCap)
@@ -415,9 +415,11 @@ export function compileNarratorContinuity(
         const fieldSummary = enabledFields
           .map(f => {
             const val = resolveCharacterFieldValue(actor, f.id);
-            if (!val) return '';
-            // Deduplicate role_summary if identical to bondToYou, and immediate_goal if plan is active
-            if (f.id === 'role_summary' && bondLabel && val.toLowerCase() === bondLabel.toLowerCase()) {
+            if (!val || val === 'None') return '';
+            if (
+              f.id === 'role_summary' &&
+              (val === 'Story Character' || (bondLabel && val.toLowerCase() === bondLabel.toLowerCase()))
+            ) {
               return '';
             }
             if (compactMode && f.id === 'immediate_goal' && planActive) {
@@ -441,8 +443,33 @@ export function compileNarratorContinuity(
     }
 
     if (hasPlaces) {
-      const placesList = Object.values(state.places);
-      outLines.push(`Places: ${placesList.map(p => p.name).join(', ')}`);
+      const curPlace = state.places[state.currentPlaceId];
+      const seenNames = new Set<string>();
+      const uniqueExits: string[] = [];
+      const pushPlace = (rawName: string | undefined) => {
+        const clean = (rawName ?? '').trim();
+        if (!clean) return;
+        const low = clean.toLowerCase();
+        if (seenNames.has(low)) return;
+        seenNames.add(low);
+        uniqueExits.push(clean);
+      };
+      if (curPlace) {
+        for (const cid of curPlace.connectedIds) {
+          pushPlace(state.places[cid]?.name);
+          if (uniqueExits.length >= 5) break;
+        }
+      }
+      if (uniqueExits.length === 0) {
+        for (const p of Object.values(state.places)) {
+          if (p.id === state.currentPlaceId) continue;
+          pushPlace(p.name);
+          if (uniqueExits.length >= 4) break;
+        }
+      }
+      if (uniqueExits.length > 0) {
+        outLines.push(`Exits: ${uniqueExits.join(', ')}`);
+      }
     }
 
     if (hasActiveQuests) {
@@ -682,6 +709,35 @@ export function buildCompactFormatExample(
     /\b(?:entered|arrived\s+at|walked\s+(?:into|to)|headed\s+to|stepped\s+(?:into|outside)|moved\s+to|travel(?:ed|ing)\s+to|left\s+for|new\s+location)\b/i.test(
       recentTranscriptText,
     );
+
+  if (isCompact && hasPersistedState) {
+    const uncalStats: Record<string, number | string | boolean> = {};
+    for (const s of otherSchemas) {
+      if (hasUncalibratedTarget(state, s)) {
+        uncalStats[s.id] = sampleValueForSchema(s, false);
+      }
+    }
+    const uncalMeters: Record<string, number | string | boolean> = {};
+    for (const s of charSchemas) {
+      if (hasUncalibratedTarget(state, s)) {
+        uncalMeters[s.id] = sampleValueForSchema(s, false);
+      }
+    }
+    const compactEnvelope: Record<string, unknown> = {
+      ...(Object.keys(sceneExample).length ? { scene: sceneExample } : {}),
+      ...(Object.keys(playerExample).length ? { player: playerExample } : {}),
+      ...(otherSchemas.length
+        ? { stats: Object.keys(uncalStats).length ? uncalStats : { '<stat_key>': '...' } }
+        : {}),
+      characters: [{ name: 'NPC', present: true, location: 'Spot', ...uncalMeters }],
+    };
+    if (core?.trackPlaces !== false && !ov.places?.locked && movementMentioned) {
+      compactEnvelope.zones = [{ name: 'Zone', kind: 'building|district|region|ship_deck', icon: '🏛️' }];
+      compactEnvelope.places = [{ name: 'Spot', zone: 'Zone', category: 'interior', icon: '📍', tags: ['safe'], description: '...' }];
+      compactEnvelope.paths = [{ from: 'A', to: 'B', type: 'door|hallway|stairs|street|trail|portal', mins: 2 }];
+    }
+    return JSON.stringify(compactEnvelope);
+  }
 
   if (isCoreActive('places', core?.trackPlaces !== false) && movementMentioned) {
     exampleObj.zones = [
@@ -986,14 +1042,16 @@ export function compileExtractorPrompt(
     }
   }
 
-  return [
+  const userName = state.player.name?.trim() || 'User';
+  const charName = existingChars.find(c => c.present)?.name?.trim() || existingChars[0]?.name?.trim() || 'Character';
+  const rawProtocol = [
     `<lumi_stats_protocol>`,
-    `ACTIVE REQUIRED CONTRACT: In EVERY reply, after all prose and preset footers, append one <lumi-stats>{...JSON...}</lumi-stats> block (use hyphenated <lumi-stats>).`,
-    `1. CAST: List active/mentioned NPCs in "characters[]" ("present": true if in room, false if offscreen; set "location", "bondToPlayer", "bondFromPlayer" on new/changed bonds). Use "+N"/"-N" deltas for numeric meters; omit unchanged fields.`,
+    `REQUIRED: End EVERY reply (after prose/footers) with <lumi-stats>{JSON}</lumi-stats> (ASCII spaces only; omit unchanged keys).`,
+    `1. CAST: Active/mentioned NPCs in "characters[]" ("present": true|false, "location", "bondToPlayer", "bondFromPlayer" if new/changed). Use "+N"/"-N" deltas for numeric meters.`,
     template.surfaces.trackNpcBonds !== false
-      ? `2. PEER BONDS ("peerBonds[]"): For NPC↔NPC relations, set {"target","label","category":"family|friend|romance|rival|professional|neutral","attitude"}.`
+      ? `2. PEER BONDS ("peerBonds[]"): {"target","label","category":"family|friend|romance|rival|professional|neutral","attitude"}.`
       : '',
-    `3. UPDATE (${trackedTargets.join(', ')} — use ONLY the exact stat/meter keys listed below; omit any removed or unlisted keys):`,
+    `3. UPDATE (${trackedTargets.join(', ')}):`,
     categoryRuleLines.length ? `Category Rules:\n${categoryRuleLines.join('\n')}` : '',
     charNumeric.length ? `NPC Meters: ${charNumeric.map(compactNumericTag).join(' | ')}` : '',
     otherNumeric.length ? `Player/World Meters: ${otherNumeric.map(compactNumericTag).join(' | ')}` : '',
@@ -1002,7 +1060,6 @@ export function compileExtractorPrompt(
       : '',
     coreSection,
     dossierSection,
-    `Append at end (ASCII spaces only; omit unchanged keys):`,
     `<lumi-stats>`,
     buildCompactFormatExample(state, template, existingChars.length > 0, recentTranscriptText, {
       verbosity: options?.verbosity ?? 'compact',
@@ -1012,6 +1069,10 @@ export function compileExtractorPrompt(
   ]
     .filter(Boolean)
     .join('\n');
+
+  return rawProtocol
+    .replace(/\{\{\s*user\s*\}\}/gi, userName)
+    .replace(/\{\{\s*char\s*\}\}/gi, charName);
 }
 
 export function buildChatVariableProjection(

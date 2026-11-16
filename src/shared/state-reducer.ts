@@ -1,5 +1,5 @@
 import { recomputeDerivedStats } from './formula';
-import { cleanBrailleAndProseWhitespace } from './prose-cleaner';
+import { cleanBrailleAndProseWhitespace, deobfuscateSensitiveWords } from './prose-cleaner';
 import { createStatSchema, slugifyKey } from './templates';
 import type {
   BondCategory,
@@ -425,10 +425,24 @@ export function applyTurnPatch(
   before: CampaignState,
   template: LumiStatsTemplate,
   patch: ExtractedTurnPatch,
-  options: { isManualEdit?: boolean; incrementTurn?: boolean } = {},
+  options: {
+    isManualEdit?: boolean;
+    incrementTurn?: boolean;
+    obfuscationConfig?: { words?: string[]; useOne?: boolean };
+  } = {},
 ): ReduceTurnResult {
   const next = structuredClone(before);
   const bypassLocks = options.isManualEdit === true;
+  const canonicalizeLabel = (raw: string): string => {
+    const cleaned = cleanStringValue(raw);
+    const words = options.obfuscationConfig?.words;
+    if (!cleaned || !words?.length) return cleaned;
+    return deobfuscateSensitiveWords(
+      cleaned,
+      words,
+      options.obfuscationConfig?.useOne !== false,
+    );
+  };
   const triggeredAlerts: string[] = [];
   const statDeltas: Record<string, number> = {};
   const characterDeltas: Record<string, Record<string, number>> = {};
@@ -474,7 +488,7 @@ export function applyTurnPatch(
     const summary = String(sceneSource.beatSummary ?? sceneSource.summary ?? '').trim();
 
     if (!pillLocked) {
-      if (loc) next.scene.location = cleanStringValue(loc);
+      if (loc) next.scene.location = canonicalizeLabel(loc);
       if (time) next.scene.timeLabel = cleanStringValue(time);
       if (date) next.scene.dateLabel = cleanStringValue(date);
       if (weather) next.scene.weather = cleanStringValue(weather);
@@ -803,9 +817,9 @@ export function applyTurnPatch(
     for (const rawChar of patch.characters) {
       if (!rawChar || typeof rawChar !== 'object') continue;
       const rawExplicitName =
-        typeof rawChar.name === 'string' ? cleanStringValue(rawChar.name) : '';
+        typeof rawChar.name === 'string' ? canonicalizeLabel(rawChar.name) : '';
       const fromIdFallback = !rawExplicitName;
-      const rawCandidate = rawExplicitName || cleanStringValue(String(rawChar.id ?? ''));
+      const rawCandidate = rawExplicitName || canonicalizeLabel(String(rawChar.id ?? ''));
       const name = normalizeDisplayLabel(rawCandidate, fromIdFallback);
       if (!name) continue;
       const slug = slugifyKey(rawChar.id ?? name, 'npc');
@@ -1321,14 +1335,24 @@ export function applyTurnPatch(
     }
   }
 
+  const matchOrCreatePlaceId = (rawPlaceName: string, explicitId?: unknown): string => {
+    const canonical = canonicalizeLabel(rawPlaceName);
+    const low = canonical.toLowerCase();
+    const byName = Object.values(next.places).find(
+      p => p.name.toLowerCase() === low || canonicalizeLabel(p.name).toLowerCase() === low,
+    );
+    if (byName) return byName.id;
+    return slugifyKey(explicitId ?? canonical, 'place');
+  };
+
   if (placesWritable && next.scene.location) {
-    const locParts = next.scene.location
+    const locParts = canonicalizeLabel(next.scene.location)
       .split(/\s*(?:,|—|–|\|)\s*/)
       .map(s => s.trim())
       .filter(Boolean);
     const primaryName = normalizeDisplayLabel(locParts[0] || next.scene.location, false);
     const secondaryZoneName = locParts[1] || '';
-    const placeId = slugifyKey(primaryName, 'scene_location');
+    const placeId = matchOrCreatePlaceId(primaryName);
     const prevPlaceId = next.currentPlaceId;
     const inferredZoneId = secondaryZoneName
       ? ensureZone(secondaryZoneName)
@@ -1371,9 +1395,10 @@ export function applyTurnPatch(
   if (placesWritable && Array.isArray(patch.places)) {
     for (const rp of patch.places) {
       if (!rp?.name?.trim()) continue;
-      const pid = slugifyKey(rp.id ?? rp.name, 'place');
+      const canonicalPlaceName = canonicalizeLabel(rp.name);
+      const pid = matchOrCreatePlaceId(canonicalPlaceName, rp.id);
       const existing = next.places[pid];
-      const cleanName = pickBetterCasedLabel(existing?.name, rp.name, false);
+      const cleanName = pickBetterCasedLabel(existing?.name, canonicalPlaceName, false);
 
       let resolvedZoneId = rp.zoneId?.trim() || existing?.zoneId;
       if (rp.zone?.trim()) {

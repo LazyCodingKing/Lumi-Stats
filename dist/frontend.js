@@ -13205,6 +13205,7 @@ function renderStudioEngineTab(ctrl, compScope, postMount) {
   for (const [key, label] of [
     ["autoTrack", "Auto-calibrate after assistant replies"],
     ["injectContinuity", "Inject continuity into narrator prompt"],
+    ["splitStaticProtocolForCache", "Cache-friendly split (static rules before history)"],
     ["memoryCortexSync", "Sync to Lumiverse Memory Cortex"],
     ["worldInfoGating", "Enable [lumi:stat>=value] World Info gates"],
     ["thresholdToasts", "Show threshold toast alerts"],

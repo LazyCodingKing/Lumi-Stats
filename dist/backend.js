@@ -2749,7 +2749,9 @@ ${formattedRule}`;
     const worldStatParts = [];
     for (const s of calibratedNonChar) {
       const rec = state.stats[s.id];
-      if (compactMode && (rec.value === "None" || rec.value === "" || rec.value === 0))
+      if (rec.value === "None" || rec.value === "")
+        continue;
+      if (compactMode && rec.value === 0)
         continue;
       const resolvedLabel = !compactMode && typeof rec.value === "number" && s.anchors.length > 0 ? resolveAnchorLabel(s.anchors, rec.value) : "";
       const tier = resolvedLabel ? ` (${resolvedLabel})` : "";
@@ -2790,23 +2792,22 @@ ${activeContinuityCategoryRules.join(`
       for (const actor of presentFirst) {
         const peerBonds = template.surfaces.trackNpcBonds !== false ? Object.values(actor.peerBonds ?? {}).map((b) => `\u2192${b.toName}(${b.label})`).join(", ") : "";
         if (!actor.present) {
-          const isTransientSceneStat = (id) => id === "acted" || id === "observation";
-          const compactMeters = charSchemas.filter((s) => !isTransientSceneStat(s.id)).map((s) => {
+          const isOffscreenSkipped = (id) => ["acted", "observation", "plan", "mask", "polarity", "knowledge", "oppurtunity"].includes(id);
+          const compactMeters = charSchemas.filter((s) => !isOffscreenSkipped(s.id)).map((s) => {
             const m = actor.meters[s.id];
             if (!m?.calibrated)
               return "";
-            if (compactMode && (m.value === "None" || m.value === ""))
+            if (m.value === "None" || m.value === "")
               return "";
-            const valStr = typeof m.value === "string" ? compactContinuityTextValue(s.id, m.value, Math.min(textCap, 90)) : String(m.value);
+            const valStr = typeof m.value === "string" ? compactContinuityTextValue(s.id, m.value, Math.min(textCap, 60)) : String(m.value);
             return `${s.id}=${valStr}`;
           }).filter(Boolean).join(", ");
           const roleTxt = resolveCharacterFieldValue(actor, "role_summary");
-          const carriedTxt = resolveCharacterFieldValue(actor, "carried_items");
           const bondLabel = actor.bondToPlayer?.label?.trim() || "";
+          const showRole = roleTxt && roleTxt !== "Story Character" && !bondLabel;
           const parts = [
             bondLabel ? `toYou="${bondLabel}"` : "",
-            roleTxt && roleTxt.toLowerCase() !== bondLabel.toLowerCase() ? `role="${compactContinuityTextValue("role", roleTxt, 50)}"` : "",
-            carriedTxt && carriedTxt !== "None" ? `items="${compactContinuityTextValue("carried_items", carriedTxt, 60)}"` : "",
+            showRole ? `role="${compactContinuityTextValue("role", roleTxt, 45)}"` : "",
             compactMeters,
             peerBonds ? `peers=[${peerBonds}]` : ""
           ].filter(Boolean);
@@ -2816,8 +2817,10 @@ ${activeContinuityCategoryRules.join(`
         const meters = charSchemas.map((s) => {
           const m = actor.meters[s.id];
           if (!m?.calibrated)
-            return compactMode ? "" : `${s.id}=?`;
-          if (compactMode && (m.value === "None" || m.value === ""))
+            return "";
+          if (m.value === "None" || m.value === "")
+            return "";
+          if (compactMode && m.value === 0)
             return "";
           const valStr = typeof m.value === "string" ? compactContinuityTextValue(s.id, m.value, textCap) : String(m.value);
           return `${s.id}=${valStr}`;
@@ -2826,9 +2829,9 @@ ${activeContinuityCategoryRules.join(`
         const bondLabel = actor.bondToPlayer?.label?.trim() || "";
         const fieldSummary = enabledFields.map((f) => {
           const val = resolveCharacterFieldValue(actor, f.id);
-          if (!val)
+          if (!val || val === "None")
             return "";
-          if (f.id === "role_summary" && bondLabel && val.toLowerCase() === bondLabel.toLowerCase()) {
+          if (f.id === "role_summary" && (val === "Story Character" || bondLabel && val.toLowerCase() === bondLabel.toLowerCase())) {
             return "";
           }
           if (compactMode && f.id === "immediate_goal" && planActive) {
@@ -2848,8 +2851,38 @@ ${activeContinuityCategoryRules.join(`
       }
     }
     if (hasPlaces) {
-      const placesList = Object.values(state.places);
-      outLines.push(`Places: ${placesList.map((p) => p.name).join(", ")}`);
+      const curPlace = state.places[state.currentPlaceId];
+      const seenNames = new Set;
+      const uniqueExits = [];
+      const pushPlace = (rawName) => {
+        const clean = (rawName ?? "").trim();
+        if (!clean)
+          return;
+        const low = clean.toLowerCase();
+        if (seenNames.has(low))
+          return;
+        seenNames.add(low);
+        uniqueExits.push(clean);
+      };
+      if (curPlace) {
+        for (const cid of curPlace.connectedIds) {
+          pushPlace(state.places[cid]?.name);
+          if (uniqueExits.length >= 5)
+            break;
+        }
+      }
+      if (uniqueExits.length === 0) {
+        for (const p of Object.values(state.places)) {
+          if (p.id === state.currentPlaceId)
+            continue;
+          pushPlace(p.name);
+          if (uniqueExits.length >= 4)
+            break;
+        }
+      }
+      if (uniqueExits.length > 0) {
+        outLines.push(`Exits: ${uniqueExits.join(", ")}`);
+      }
     }
     if (hasActiveQuests) {
       const activeQuests = Object.values(state.quests).filter((q) => q.status === "active");
@@ -3041,6 +3074,32 @@ function buildCompactFormatExample(state, template, hasPersistedState = false, r
   };
   const hasPlacesAlready = Object.keys(state.places).length > 0;
   const movementMentioned = !hasPlacesAlready || /\b(?:entered|arrived\s+at|walked\s+(?:into|to)|headed\s+to|stepped\s+(?:into|outside)|moved\s+to|travel(?:ed|ing)\s+to|left\s+for|new\s+location)\b/i.test(recentTranscriptText);
+  if (isCompact && hasPersistedState) {
+    const uncalStats = {};
+    for (const s of otherSchemas) {
+      if (hasUncalibratedTarget(state, s)) {
+        uncalStats[s.id] = sampleValueForSchema(s, false);
+      }
+    }
+    const uncalMeters = {};
+    for (const s of charSchemas) {
+      if (hasUncalibratedTarget(state, s)) {
+        uncalMeters[s.id] = sampleValueForSchema(s, false);
+      }
+    }
+    const compactEnvelope = {
+      ...Object.keys(sceneExample).length ? { scene: sceneExample } : {},
+      ...Object.keys(playerExample).length ? { player: playerExample } : {},
+      ...otherSchemas.length ? { stats: Object.keys(uncalStats).length ? uncalStats : { "<stat_key>": "..." } } : {},
+      characters: [{ name: "NPC", present: true, location: "Spot", ...uncalMeters }]
+    };
+    if (core?.trackPlaces !== false && !ov.places?.locked && movementMentioned) {
+      compactEnvelope.zones = [{ name: "Zone", kind: "building|district|region|ship_deck", icon: "\uD83C\uDFDB\uFE0F" }];
+      compactEnvelope.places = [{ name: "Spot", zone: "Zone", category: "interior", icon: "\uD83D\uDCCD", tags: ["safe"], description: "..." }];
+      compactEnvelope.paths = [{ from: "A", to: "B", type: "door|hallway|stairs|street|trail|portal", mins: 2 }];
+    }
+    return JSON.stringify(compactEnvelope);
+  }
   if (isCoreActive("places", core?.trackPlaces !== false) && movementMentioned) {
     exampleObj.zones = [
       { name: "Zone", kind: "building|district|region|ship_deck", icon: "\uD83C\uDFDB\uFE0F" }
@@ -3250,12 +3309,14 @@ ${corePromptHints.join(`
   \u2022 ${dossierHints.join(" | ")}`;
     }
   }
-  return [
+  const userName = state.player.name?.trim() || "User";
+  const charName = existingChars.find((c) => c.present)?.name?.trim() || existingChars[0]?.name?.trim() || "Character";
+  const rawProtocol = [
     `<lumi_stats_protocol>`,
-    `ACTIVE REQUIRED CONTRACT: In EVERY reply, after all prose and preset footers, append one <lumi-stats>{...JSON...}</lumi-stats> block (use hyphenated <lumi-stats>).`,
-    `1. CAST: List active/mentioned NPCs in "characters[]" ("present": true if in room, false if offscreen; set "location", "bondToPlayer", "bondFromPlayer" on new/changed bonds). Use "+N"/"-N" deltas for numeric meters; omit unchanged fields.`,
-    template.surfaces.trackNpcBonds !== false ? `2. PEER BONDS ("peerBonds[]"): For NPC\u2194NPC relations, set {"target","label","category":"family|friend|romance|rival|professional|neutral","attitude"}.` : "",
-    `3. UPDATE (${trackedTargets.join(", ")} \u2014 use ONLY the exact stat/meter keys listed below; omit any removed or unlisted keys):`,
+    `REQUIRED: End EVERY reply (after prose/footers) with <lumi-stats>{JSON}</lumi-stats> (ASCII spaces only; omit unchanged keys).`,
+    `1. CAST: Active/mentioned NPCs in "characters[]" ("present": true|false, "location", "bondToPlayer", "bondFromPlayer" if new/changed). Use "+N"/"-N" deltas for numeric meters.`,
+    template.surfaces.trackNpcBonds !== false ? `2. PEER BONDS ("peerBonds[]"): {"target","label","category":"family|friend|romance|rival|professional|neutral","attitude"}.` : "",
+    `3. UPDATE (${trackedTargets.join(", ")}):`,
     categoryRuleLines.length ? `Category Rules:
 ${categoryRuleLines.join(`
 `)}` : "",
@@ -3266,7 +3327,6 @@ ${groupedTextRules.join(`
 `)}` : "",
     coreSection,
     dossierSection,
-    `Append at end (ASCII spaces only; omit unchanged keys):`,
     `<lumi-stats>`,
     buildCompactFormatExample(state, template, existingChars.length > 0, recentTranscriptText, {
       verbosity: options?.verbosity ?? "compact"
@@ -3275,6 +3335,7 @@ ${groupedTextRules.join(`
     `</lumi_stats_protocol>`
   ].filter(Boolean).join(`
 `);
+  return rawProtocol.replace(/\{\{\s*user\s*\}\}/gi, userName).replace(/\{\{\s*char\s*\}\}/gi, charName);
 }
 function buildChatVariableProjection(state, template) {
   const banner = formatSceneBanner(state);
@@ -3805,6 +3866,13 @@ function matchStatSchema(schemas, rawKey, scopeFilter) {
 function applyTurnPatch(before, template, patch, options = {}) {
   const next = structuredClone(before);
   const bypassLocks = options.isManualEdit === true;
+  const canonicalizeLabel = (raw) => {
+    const cleaned = cleanStringValue(raw);
+    const words = options.obfuscationConfig?.words;
+    if (!cleaned || !words?.length)
+      return cleaned;
+    return deobfuscateSensitiveWords(cleaned, words, options.obfuscationConfig?.useOne !== false);
+  };
   const triggeredAlerts = [];
   const statDeltas = {};
   const characterDeltas = {};
@@ -3835,7 +3903,7 @@ function applyTurnPatch(before, template, patch, options = {}) {
     const summary = String(sceneSource.beatSummary ?? sceneSource.summary ?? "").trim();
     if (!pillLocked) {
       if (loc)
-        next.scene.location = cleanStringValue(loc);
+        next.scene.location = canonicalizeLabel(loc);
       if (time)
         next.scene.timeLabel = cleanStringValue(time);
       if (date)
@@ -4078,9 +4146,9 @@ function applyTurnPatch(before, template, patch, options = {}) {
     for (const rawChar of patch.characters) {
       if (!rawChar || typeof rawChar !== "object")
         continue;
-      const rawExplicitName = typeof rawChar.name === "string" ? cleanStringValue(rawChar.name) : "";
+      const rawExplicitName = typeof rawChar.name === "string" ? canonicalizeLabel(rawChar.name) : "";
       const fromIdFallback = !rawExplicitName;
-      const rawCandidate = rawExplicitName || cleanStringValue(String(rawChar.id ?? ""));
+      const rawCandidate = rawExplicitName || canonicalizeLabel(String(rawChar.id ?? ""));
       const name = normalizeDisplayLabel(rawCandidate, fromIdFallback);
       if (!name)
         continue;
@@ -4523,11 +4591,19 @@ function applyTurnPatch(before, template, patch, options = {}) {
       });
     }
   }
+  const matchOrCreatePlaceId = (rawPlaceName, explicitId) => {
+    const canonical = canonicalizeLabel(rawPlaceName);
+    const low = canonical.toLowerCase();
+    const byName = Object.values(next.places).find((p) => p.name.toLowerCase() === low || canonicalizeLabel(p.name).toLowerCase() === low);
+    if (byName)
+      return byName.id;
+    return slugifyKey(explicitId ?? canonical, "place");
+  };
   if (placesWritable && next.scene.location) {
-    const locParts = next.scene.location.split(/\s*(?:,|\u2014|\u2013|\|)\s*/).map((s) => s.trim()).filter(Boolean);
+    const locParts = canonicalizeLabel(next.scene.location).split(/\s*(?:,|\u2014|\u2013|\|)\s*/).map((s) => s.trim()).filter(Boolean);
     const primaryName = normalizeDisplayLabel(locParts[0] || next.scene.location, false);
     const secondaryZoneName = locParts[1] || "";
-    const placeId = slugifyKey(primaryName, "scene_location");
+    const placeId = matchOrCreatePlaceId(primaryName);
     const prevPlaceId = next.currentPlaceId;
     const inferredZoneId = secondaryZoneName ? ensureZone(secondaryZoneName) : next.places[placeId]?.zoneId ?? (prevPlaceId ? next.places[prevPlaceId]?.zoneId : undefined);
     if (!next.places[placeId]) {
@@ -4567,9 +4643,10 @@ function applyTurnPatch(before, template, patch, options = {}) {
     for (const rp of patch.places) {
       if (!rp?.name?.trim())
         continue;
-      const pid = slugifyKey(rp.id ?? rp.name, "place");
+      const canonicalPlaceName = canonicalizeLabel(rp.name);
+      const pid = matchOrCreatePlaceId(canonicalPlaceName, rp.id);
       const existing = next.places[pid];
-      const cleanName = pickBetterCasedLabel(existing?.name, rp.name, false);
+      const cleanName = pickBetterCasedLabel(existing?.name, canonicalPlaceName, false);
       let resolvedZoneId = rp.zoneId?.trim() || existing?.zoneId;
       if (rp.zone?.trim()) {
         resolvedZoneId = ensureZone(rp.zone, { id: rp.zoneId });
@@ -4949,6 +5026,7 @@ var DEFAULT_USER_SETTINGS = Object.freeze({
   injectContinuity: true,
   tokenBudget: 450,
   protocolVerbosity: "compact",
+  splitStaticProtocolForCache: false,
   sidecarHistoryTurns: 4,
   sidecarMaxCharsPerMsg: 2500,
   defaultTemplateId: "universal_companion",
@@ -5910,7 +5988,13 @@ IMPORTANT: Output ONLY a single valid JSON object. Do not wrap in conversational
         }
       }
       const reduced = applyTurnPatch(snapshot.state, template, patch, {
-        incrementTurn: targetMsg.role === "assistant"
+        incrementTurn: targetMsg.role === "assistant",
+        ...settings.sensitiveObfuscatorEnabled && (settings.sensitiveWords?.length ?? 0) > 0 ? {
+          obfuscationConfig: {
+            words: settings.sensitiveWords,
+            useOne: settings.obfuscateVowelsWithOne !== false
+          }
+        } : {}
       });
       await this.linkCardPortraitIfAvailable(userId, chatId, reduced.state);
       this.processedTurnKeys.add(idempotencyKey);
@@ -7208,8 +7292,12 @@ class LumiStatsService {
         const shouldInjectContinuity = !promptAlreadyHasContinuity && Boolean(snap.state.canonPremise || settings.injectContinuity && continuity.text);
         const recentTextForGating = cleanedMessages.filter((m) => m?.__isChatHistory).slice(-4).map((m) => getMessagePlainText(m)).join(`
 `);
-        const inlineContract = settings.extractionMode === "inline_tag" && !promptAlreadyHasProtocol ? `Append updated state at the end as <lumi-stats>{...JSON...}</lumi-stats>:
-${compileExtractorPrompt(snap.state, snap.template, recentTextForGating, { verbosity: settings.protocolVerbosity ?? "compact", skipContinuityCategoryRules: Boolean(shouldInjectContinuity && settings.injectContinuity && continuity.text) })}` : "";
+        const splitProtocolForCache = Boolean(settings.splitStaticProtocolForCache) && (snap.template.promptPosition || "post_history") !== "pre_history";
+        const skipCatInProto = Boolean(!splitProtocolForCache && shouldInjectContinuity && settings.injectContinuity && continuity.text);
+        const inlineContract = settings.extractionMode === "inline_tag" && !promptAlreadyHasProtocol ? compileExtractorPrompt(snap.state, snap.template, splitProtocolForCache ? "" : recentTextForGating, {
+          verbosity: settings.protocolVerbosity ?? "compact",
+          skipContinuityCategoryRules: skipCatInProto
+        }) : "";
         const obfSendActive = Boolean(settings.sensitiveObfuscatorEnabled) && settings.obfuscateOnSend !== false && (settings.sensitiveWords?.length ?? 0) > 0;
         const obfWords = settings.sensitiveWords ?? [];
         const useOne = settings.obfuscateVowelsWithOne !== false;
@@ -7241,6 +7329,30 @@ ${compileExtractorPrompt(snap.state, snap.template, recentTextForGating, { verbo
           return outObf;
         }
         const cipherHintLine = obfSendActive && settings.includeCipherHint === true ? cipherNoteText : "";
+        const obfuscateContinuitySafely = (rawText) => {
+          if (!obfSendActive || !rawText)
+            return rawText;
+          let inStructuralDirectives = false;
+          return rawText.split(`
+`).map((line) => {
+            if (line.startsWith("[Lumi Stats \xB7") || line.startsWith("[Cipher Note:") || line.startsWith("Scene: [") || line.startsWith("Exits: ")) {
+              inStructuralDirectives = false;
+              return line;
+            }
+            if (line.startsWith("Category Directives:")) {
+              inStructuralDirectives = true;
+              return line;
+            }
+            if (line.startsWith("Cast (")) {
+              inStructuralDirectives = false;
+              return line;
+            }
+            if (inStructuralDirectives)
+              return line;
+            return obfuscateSensitiveWords(line, obfWords, useOne);
+          }).join(`
+`);
+        };
         const storyContinuityRaw = [
           shouldInjectContinuity ? `[Lumi Stats \xB7 Story Continuity \u2014 guide reactions naturally; never quote raw numbers in dialogue]` : "",
           cipherHintLine,
@@ -7249,10 +7361,7 @@ ${compileExtractorPrompt(snap.state, snap.template, recentTextForGating, { verbo
         ].filter(Boolean).join(`
 
 `);
-        const obfuscatedContinuity = obfSendActive ? obfuscateSensitiveWords(storyContinuityRaw, obfWords, useOne) : storyContinuityRaw;
-        const finalSystemContent = [inlineContract, obfuscatedContinuity].filter(Boolean).join(`
-
-`);
+        const obfuscatedContinuity = obfuscateContinuitySafely(storyContinuityRaw);
         const pos = snap.template.promptPosition || "post_history";
         const out = cleanedMessages.map(applyObfToMessage);
         const historyIndices = [];
@@ -7261,6 +7370,43 @@ ${compileExtractorPrompt(snap.state, snap.template, recentTextForGating, { verbo
             historyIndices.push(i);
           }
         }
+        if (splitProtocolForCache && inlineContract && obfuscatedContinuity) {
+          const preIndex = historyIndices.length > 0 ? historyIndices[0] : 0;
+          out.splice(preIndex, 0, { role: "system", content: inlineContract });
+          let postIndex = out.length;
+          if (pos === "in_history") {
+            const shiftedHist = historyIndices.map((idx) => idx >= preIndex ? idx + 1 : idx);
+            const depth = Math.max(0, Math.round(Number(snap.template.promptDepth ?? 1) || 0));
+            if (shiftedHist.length > 0) {
+              if (depth === 0)
+                postIndex = shiftedHist[shiftedHist.length - 1] + 1;
+              else if (depth <= shiftedHist.length)
+                postIndex = shiftedHist[shiftedHist.length - depth];
+              else
+                postIndex = shiftedHist[0];
+            } else {
+              postIndex = Math.max(preIndex + 1, out.length - depth);
+            }
+          } else {
+            while (postIndex > preIndex + 1 && out[postIndex - 1]?.role === "assistant") {
+              postIndex--;
+            }
+          }
+          const dynamicPayload = `${obfuscatedContinuity}
+
+[Reminder: Append updated <lumi-stats>{...}</lumi-stats> at end per <lumi_stats_protocol>.]`;
+          out.splice(postIndex, 0, { role: "system", content: dynamicPayload });
+          return {
+            messages: out,
+            breakdown: [
+              { messageIndex: preIndex, name: "Lumi Stats Protocol (Cacheable)" },
+              { messageIndex: postIndex, name: "Lumi Stats Continuity" }
+            ]
+          };
+        }
+        const finalSystemContent = [inlineContract, obfuscatedContinuity].filter(Boolean).join(`
+
+`);
         let insertIndex = out.length;
         if (pos === "pre_history") {
           insertIndex = historyIndices.length > 0 ? historyIndices[0] : 0;

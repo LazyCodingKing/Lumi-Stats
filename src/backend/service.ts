@@ -1446,9 +1446,26 @@ export class LumiStatsService {
           .map(m => getMessagePlainText(m))
           .join('\n');
 
+        const splitProtocolForCache =
+          Boolean(settings.splitStaticProtocolForCache) &&
+          (snap.template.promptPosition || 'post_history') !== 'pre_history';
+        const skipCatInProto = Boolean(
+          !splitProtocolForCache &&
+            shouldInjectContinuity &&
+            settings.injectContinuity &&
+            continuity.text,
+        );
         const inlineContract =
           settings.extractionMode === 'inline_tag' && !promptAlreadyHasProtocol
-            ? `Append updated state at the end as <lumi-stats>{...JSON...}</lumi-stats>:\n${compileExtractorPrompt(snap.state, snap.template, recentTextForGating, { verbosity: settings.protocolVerbosity ?? 'compact', skipContinuityCategoryRules: Boolean(shouldInjectContinuity && settings.injectContinuity && continuity.text) })}`
+            ? compileExtractorPrompt(
+                snap.state,
+                snap.template,
+                splitProtocolForCache ? '' : recentTextForGating,
+                {
+                  verbosity: settings.protocolVerbosity ?? 'compact',
+                  skipContinuityCategoryRules: skipCatInProto,
+                },
+              )
             : '';
 
         const obfSendActive =
@@ -1492,6 +1509,35 @@ export class LumiStatsService {
         const cipherHintLine =
           obfSendActive && settings.includeCipherHint === true ? cipherNoteText : '';
 
+        const obfuscateContinuitySafely = (rawText: string): string => {
+          if (!obfSendActive || !rawText) return rawText;
+          let inStructuralDirectives = false;
+          return rawText
+            .split('\n')
+            .map(line => {
+              if (
+                line.startsWith('[Lumi Stats ·') ||
+                line.startsWith('[Cipher Note:') ||
+                line.startsWith('Scene: [') ||
+                line.startsWith('Exits: ')
+              ) {
+                inStructuralDirectives = false;
+                return line;
+              }
+              if (line.startsWith('Category Directives:')) {
+                inStructuralDirectives = true;
+                return line;
+              }
+              if (line.startsWith('Cast (')) {
+                inStructuralDirectives = false;
+                return line;
+              }
+              if (inStructuralDirectives) return line;
+              return obfuscateSensitiveWords(line, obfWords, useOne);
+            })
+            .join('\n');
+        };
+
         const storyContinuityRaw = [
           shouldInjectContinuity
             ? `[Lumi Stats · Story Continuity — guide reactions naturally; never quote raw numbers in dialogue]`
@@ -1505,14 +1551,7 @@ export class LumiStatsService {
           .filter(Boolean)
           .join('\n\n');
 
-        const obfuscatedContinuity = obfSendActive
-          ? obfuscateSensitiveWords(storyContinuityRaw, obfWords, useOne)
-          : storyContinuityRaw;
-
-        // Keep static <lumi_stats_protocol> unobfuscated & first for prompt-prefix caching
-        const finalSystemContent = [inlineContract, obfuscatedContinuity]
-          .filter(Boolean)
-          .join('\n\n');
+        const obfuscatedContinuity = obfuscateContinuitySafely(storyContinuityRaw);
 
         const pos = snap.template.promptPosition || 'post_history';
         const out = cleanedMessages.map(applyObfToMessage);
@@ -1522,6 +1561,42 @@ export class LumiStatsService {
             historyIndices.push(i);
           }
         }
+
+        if (splitProtocolForCache && inlineContract && obfuscatedContinuity) {
+          const preIndex = historyIndices.length > 0 ? historyIndices[0]! : 0;
+          out.splice(preIndex, 0, { role: 'system', content: inlineContract });
+
+          let postIndex = out.length;
+          if (pos === 'in_history') {
+            const shiftedHist = historyIndices.map(idx => (idx >= preIndex ? idx + 1 : idx));
+            const depth = Math.max(0, Math.round(Number(snap.template.promptDepth ?? 1) || 0));
+            if (shiftedHist.length > 0) {
+              if (depth === 0) postIndex = shiftedHist[shiftedHist.length - 1]! + 1;
+              else if (depth <= shiftedHist.length) postIndex = shiftedHist[shiftedHist.length - depth]!;
+              else postIndex = shiftedHist[0]!;
+            } else {
+              postIndex = Math.max(preIndex + 1, out.length - depth);
+            }
+          } else {
+            while (postIndex > preIndex + 1 && out[postIndex - 1]?.role === 'assistant') {
+              postIndex--;
+            }
+          }
+          const dynamicPayload = `${obfuscatedContinuity}\n\n[Reminder: Append updated <lumi-stats>{...}</lumi-stats> at end per <lumi_stats_protocol>.]`;
+          out.splice(postIndex, 0, { role: 'system', content: dynamicPayload });
+          return {
+            messages: out,
+            breakdown: [
+              { messageIndex: preIndex, name: 'Lumi Stats Protocol (Cacheable)' },
+              { messageIndex: postIndex, name: 'Lumi Stats Continuity' },
+            ],
+          };
+        }
+
+        // Keep static <lumi_stats_protocol> unobfuscated & first for prompt-prefix caching
+        const finalSystemContent = [inlineContract, obfuscatedContinuity]
+          .filter(Boolean)
+          .join('\n\n');
 
         let insertIndex = out.length;
         if (pos === 'pre_history') {
