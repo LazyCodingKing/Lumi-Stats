@@ -54,6 +54,7 @@ const BUILTIN_TRACKER_META: Record<BuiltInTrackerId, BuiltInMeta> = {
     toggleKey: 'trackPlayerAction',
     labelKey: 'playerActionLabel',
     instructionKey: 'playerActionInstruction',
+    showCardKey: 'showPlayerActionCard',
     supportsCardDisplay: true,
   },
   scene_summary: {
@@ -142,6 +143,7 @@ export function resolveBuiltInTrackerConfig(
     inlineTabId: ov.inlineTabId ?? (id === 'quests' || id === 'dispatches' ? 'world' : 'stats'),
     pinnedToHeader: Boolean(ov.pinnedToHeader),
     locked: Boolean(ov.locked),
+    deleted: Boolean(ov.deleted),
   };
 }
 
@@ -283,11 +285,16 @@ export function openScenePillEditorModal(ctrl: LumiFrontendController): void {
           flowArea.value = defaults.sceneTimeFlowInstruction ?? '';
         }, 'ls-btn-sm'),
         btn('💾 Save Scene Pill Config', () => {
+          const liveTpl = structuredClone(ctrl.snapshot.template);
+          const liveCore: CoreTrackersConfig = {
+            ...defaults,
+            ...(liveTpl.coreTrackers ?? {}),
+          };
           void ctrl.request('state:mutate', {
             templatePatch: {
-              theme: { ...tpl.theme, showSceneChips: chips },
+              theme: { ...liveTpl.theme, showSceneChips: chips },
               coreTrackers: {
-                ...core,
+                ...liveCore,
                 scenePillLocked: locked,
                 sceneLocationInstruction: locArea.value.trim(),
                 sceneTimeInstruction: timeArea.value.trim(),
@@ -536,7 +543,8 @@ export function openBuiltinTrackerModal(
 
       const footer = el('div', 'ls-row-between');
       footer.style.marginTop = '12px';
-      footer.append(
+      const leftBtns = el('div', 'ls-row');
+      leftBtns.append(
         btn('↺ Reset Default', () => {
           iconInp.value = meta.defaultIcon;
           labelInp.value = meta.defaultLabel;
@@ -546,17 +554,59 @@ export function openBuiltinTrackerModal(
           selectedSpan = 'full';
           syncSwatches();
         }, 'ls-btn-sm'),
+        btn('🗑️ Delete Built-In', async () => {
+          const ok = await ctrl.modals.confirm({
+            title: `Remove "${meta.defaultLabel}"?`,
+            message: `Disable and remove "${meta.defaultLabel}" from active tracking and Studio? (You can restore deleted built-ins anytime from Studio.)`,
+            confirmLabel: 'Delete',
+            variant: 'danger',
+          });
+          if (!ok) return;
+          const liveTpl = structuredClone(ctrl.snapshot.template);
+          const liveCore: CoreTrackersConfig = {
+            ...defaults,
+            ...(liveTpl.coreTrackers ?? {}),
+            overrides: { ...(liveTpl.coreTrackers?.overrides ?? {}) },
+          };
+          const nextCore: CoreTrackersConfig = {
+            ...liveCore,
+            [meta.toggleKey]: false,
+            ...(meta.showCardKey ? { [meta.showCardKey]: false } : {}),
+            overrides: {
+              ...(liveCore.overrides ?? {}),
+              [id]: {
+                ...(liveCore.overrides?.[id] ?? {}),
+                deleted: true,
+              },
+            },
+          };
+          void ctrl.request('state:mutate', {
+            templatePatch: { coreTrackers: nextCore },
+            reason: `Deleted built-in tracker "${meta.defaultLabel}"`,
+          });
+          ctrl.notify(`Removed "${meta.defaultLabel}".`);
+          close();
+        }, 'ls-btn-sm ls-btn-danger'),
+      );
+      footer.append(
+        leftBtns,
         btn('💾 Save Built-In Tracker', () => {
           const nextLabel = labelInp.value.trim() || meta.defaultLabel;
           const nextInst = promptArea.value.trim();
+          const liveTpl = structuredClone(ctrl.snapshot.template);
+          const liveCore: CoreTrackersConfig = {
+            ...defaults,
+            ...(liveTpl.coreTrackers ?? {}),
+            overrides: { ...(liveTpl.coreTrackers?.overrides ?? {}) },
+          };
           const nextCore: CoreTrackersConfig = {
-            ...core,
+            ...liveCore,
             [meta.toggleKey]: enabled,
             ...(meta.labelKey ? { [meta.labelKey]: nextLabel } : {}),
             [meta.instructionKey]: nextInst,
             ...(meta.showCardKey ? { [meta.showCardKey]: showCard } : {}),
             overrides: {
-              ...(core.overrides ?? {}),
+              ...(liveCore.overrides ?? {}),
               [id]: {
                 icon: iconInp.value.trim() || meta.defaultIcon,
                 label: nextLabel,
@@ -567,6 +617,7 @@ export function openBuiltinTrackerModal(
                 widgetTabId: selectedWTab,
                 inlineTabId: selectedITab,
                 locked,
+                deleted: false,
               },
             },
           };

@@ -1,23 +1,27 @@
 import { btn, el, type ComponentScope, type LumiFrontendController } from '../controller';
+import { resolveBuiltInTrackerConfig } from './BuiltinTrackerModals';
 import { renderStatGridSurface } from './StatGrid';
 
 export function renderWorldSurface(
   ctrl: LumiFrontendController,
   compScope?: ComponentScope,
 ): HTMLElement {
-  const { state } = ctrl.snapshot;
+  const { state, template } = ctrl.snapshot;
   const wrap = el('div', 'ls-stack');
+  const qCfg = resolveBuiltInTrackerConfig(template.coreTrackers, 'quests');
+  const dCfg = resolveBuiltInTrackerConfig(template.coreTrackers, 'dispatches');
 
   const worldStatsCard = el('section', 'ls-card');
   worldStatsCard.append(renderStatGridSurface(ctrl, ['world', 'scene'], compScope, true));
   wrap.append(worldStatsCard);
 
   // Quests Card
+  if (qCfg.enabled && !qCfg.deleted) {
   const quests = Object.values(state.quests);
   const qCard = el('section', 'ls-card');
   const qHead = el('div', 'ls-row-between');
   qHead.append(
-    el('h3', '', `🎯 Quests & Objectives (${quests.filter(q => q.status === 'active').length})`),
+    el('h3', '', `${qCfg.icon || '🎯'} ${qCfg.label} (${quests.filter(q => q.status === 'active').length})`),
     btn('+ Add Quest', () => {
       ctrl.modals.open({ title: '➕ Add Quest or Goal', width: 460 }, (body, close) => {
         const tWrap = el('label', 'ls-label', 'Quest Title');
@@ -76,11 +80,12 @@ export function renderWorldSurface(
     }
   }
   wrap.append(qCard);
+  }
 
   // Off-Screen Dispatches Card
-  if (state.dispatches.length > 0) {
+  if (dCfg.enabled && !dCfg.deleted && state.dispatches.length > 0) {
     const dCard = el('section', 'ls-card');
-    dCard.append(el('h3', '', `📡 Meanwhile / Off-Screen Dispatches (${state.dispatches.length})`));
+    dCard.append(el('h3', '', `${dCfg.icon || '📡'} ${dCfg.label} (${state.dispatches.length})`));
     for (const disp of [...state.dispatches].reverse().slice(0, 6)) {
       const cell = el('div', 'ls-stat-cell');
       const top = el('div', 'ls-row-between');

@@ -154,7 +154,12 @@ export function mountLumiStats(ctx: SpindleFrontendContext): () => void {
             btn('✏️ Edit Scene', () => openSceneBannerModal(ctrl), 'ls-btn-sm'),
           );
           sceneCard.append(topRow);
-          if (state.scene.beatSummary) {
+          const coreTrackers = ctrl.snapshot.template.coreTrackers;
+          if (
+            state.scene.beatSummary &&
+            coreTrackers?.trackSceneSummary !== false &&
+            !coreTrackers?.overrides?.scene_summary?.deleted
+          ) {
             sceneCard.append(el('p', 'ls-muted', state.scene.beatSummary));
           }
           body.append(sceneCard);

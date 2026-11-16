@@ -4,7 +4,11 @@ import {
   parseStatTokens,
   resolveAnchorLabel,
 } from './formula';
-import { slugifyKey } from './templates';
+import {
+  defaultCoreTrackersConfig,
+  defaultDossierFields,
+  slugifyKey,
+} from './templates';
 import type {
   CampaignState,
   CharacterRecord,
@@ -589,11 +593,23 @@ export function buildCompactFormatExample(
   );
   const flatMeters: Record<string, number | string | boolean> = {};
   for (const s of charSchemas) {
-    flatMeters[s.id] = isCompact && hasPersistedState ? (isTextLikeStat(s) ? '...' : '+N') : sampleValueForSchema(s, hasPersistedState);
+    const needsCal = hasUncalibratedTarget(state, s);
+    flatMeters[s.id] =
+      isCompact && hasPersistedState && !needsCal
+        ? isTextLikeStat(s)
+          ? '...'
+          : '+N'
+        : sampleValueForSchema(s, hasPersistedState && !needsCal);
   }
   const flatStats: Record<string, number | string | boolean> = {};
   for (const s of otherSchemas) {
-    flatStats[s.id] = isCompact && hasPersistedState ? (isTextLikeStat(s) ? '...' : '+N') : sampleValueForSchema(s, hasPersistedState);
+    const needsCal = hasUncalibratedTarget(state, s);
+    flatStats[s.id] =
+      isCompact && hasPersistedState && !needsCal
+        ? isTextLikeStat(s)
+          ? '...'
+          : '+N'
+        : sampleValueForSchema(s, hasPersistedState && !needsCal);
   }
 
   const charExample: Record<string, unknown> = {
@@ -629,10 +645,15 @@ export function buildCompactFormatExample(
   }
 
   const ov = core?.overrides ?? {};
+  const isCoreActive = (
+    id: keyof NonNullable<typeof ov>,
+    enabledFlag: boolean,
+  ) => enabledFlag && !ov[id]?.locked && !ov[id]?.deleted;
+
   const playerExample: Record<string, string> = {};
-  if (core?.trackPlayerAttire !== false && !ov.player_attire?.locked) playerExample.attire = '...';
-  if (core?.trackPlayerCondition !== false && !ov.player_condition?.locked) playerExample.condition = '...';
-  if (core?.trackPlayerAction && !ov.player_action?.locked) playerExample.notableAction = '...';
+  if (isCoreActive('player_attire', core?.trackPlayerAttire !== false)) playerExample.attire = '...';
+  if (isCoreActive('player_condition', core?.trackPlayerCondition !== false)) playerExample.condition = '...';
+  if (isCoreActive('player_action', Boolean(core?.trackPlayerAction))) playerExample.notableAction = '...';
 
   const sceneExample: Record<string, unknown> = {};
   if (!core?.scenePillLocked) {
@@ -644,7 +665,7 @@ export function buildCompactFormatExample(
     }
     sceneExample.mins = 5;
   }
-  if (core?.trackSceneSummary !== false && !ov.scene_summary?.locked) {
+  if (isCoreActive('scene_summary', core?.trackSceneSummary !== false)) {
     sceneExample.summary = '...';
   }
 
@@ -662,7 +683,7 @@ export function buildCompactFormatExample(
       recentTranscriptText,
     );
 
-  if (core?.trackPlaces !== false && !ov.places?.locked && movementMentioned) {
+  if (isCoreActive('places', core?.trackPlaces !== false) && movementMentioned) {
     exampleObj.zones = [
       { name: 'Zone', kind: 'building|district|region|ship_deck', icon: '🏛️' },
     ];
@@ -673,7 +694,7 @@ export function buildCompactFormatExample(
       { from: 'A', to: 'B', type: 'door|hallway|stairs|street|trail|portal', mins: 2 },
     ];
   }
-  if (core?.trackQuests !== false && !ov.quests?.locked && !hasPersistedState) {
+  if (isCoreActive('quests', core?.trackQuests !== false) && !hasPersistedState) {
     exampleObj.quests = [
       { title: 'Arc', status: 'active', summary: '...' },
     ];
@@ -745,15 +766,23 @@ export function compileExtractorPrompt(
     const needsFullCalibration = !isCompact || hasUncalibratedTarget(state, s);
     let cueText = s.triggerCues;
     if (!needsFullCalibration && cueText) {
-      // Drop verbose Turn-1 scale calibration examples when targets are already calibrated
       cueText = cueText
         .replace(/0[–-]100\s*scale\.\s*/gi, '')
         .replace(/Calibrate[^.;]*?\([^)]*\)[^.;]*[.;]\s*/gi, '')
         .trim();
     }
-    const cueShort = cueText ? clipAtWordBoundary(cueText, needsFullCalibration ? 240 : 110) : '';
+    const cueShort = cueText ? clipAtWordBoundary(cueText, needsFullCalibration ? 260 : 180) : '';
+    const anchorShort =
+      s.anchors.length > 0 && (needsFullCalibration || !cueShort)
+        ? `anchors: ${[...s.anchors]
+            .sort((a, b) => a.value - b.value)
+            .slice(0, 4)
+            .map(a => `${a.value}=${a.label}`)
+            .join(', ')}`
+        : '';
+    const guidance = [cueShort, anchorShort].filter(Boolean).join('; ') || 'shift when relevant in scene';
     const labelHint = slugifyKey(s.label, '') !== s.id ? ` "${s.label}"` : '';
-    return `${s.id}${labelHint}[${s.min}..${s.max},${mode}${cueShort ? `: ${cueShort}` : ''}]`;
+    return `${s.id}${labelHint}[${s.min}..${s.max},${mode}: ${guidance}]`;
   };
 
   const charNumeric = charSchemas.filter(s => !isTextLikeStat(s) && s.kind !== 'boolean');
@@ -788,14 +817,20 @@ export function compileExtractorPrompt(
   const customDossierFields = enabledFields.filter(f => !DEFAULT_FIELD_IDS.has(f.id));
   const editedDefaultFields = enabledFields.filter(f => DEFAULT_FIELD_IDS.has(f.id));
 
+  const defaultCore = defaultCoreTrackersConfig();
+  const isCoreEnabled = (
+    id: keyof NonNullable<NonNullable<typeof core>['overrides']>,
+    enabledFlag: boolean,
+  ) => enabledFlag && !ov[id]?.locked && !ov[id]?.deleted;
+
   const trackedTargets = [
-    core?.trackPlayerAttire !== false && !ov.player_attire?.locked ? 'player.attire' : '',
-    core?.trackPlayerCondition !== false && !ov.player_condition?.locked ? 'player.condition' : '',
-    core?.trackPlayerAction && !ov.player_action?.locked ? 'player.notableAction' : '',
+    isCoreEnabled('player_attire', core?.trackPlayerAttire !== false) ? 'player.attire' : '',
+    isCoreEnabled('player_condition', core?.trackPlayerCondition !== false) ? 'player.condition' : '',
+    isCoreEnabled('player_action', Boolean(core?.trackPlayerAction)) ? 'player.notableAction' : '',
     !core?.scenePillLocked ? 'scene' : '',
-    core?.trackPlaces !== false && !ov.places?.locked ? 'places[]' : '',
-    core?.trackQuests !== false && !ov.quests?.locked ? 'quests[]' : '',
-    core?.trackDispatches !== false && !ov.dispatches?.locked ? 'dispatches[]' : '',
+    isCoreEnabled('places', core?.trackPlaces !== false) ? 'places[]' : '',
+    isCoreEnabled('quests', core?.trackQuests !== false) ? 'quests[]' : '',
+    isCoreEnabled('dispatches', core?.trackDispatches !== false) ? 'dispatches[]' : '',
   ].filter(Boolean);
 
   const resolveCoreInst = (
@@ -803,24 +838,64 @@ export function compileExtractorPrompt(
     fallback?: string,
   ): string => (ov[id]?.instruction ?? fallback ?? '').trim();
 
+  const isCustomCoreInst = (
+    id: keyof NonNullable<NonNullable<typeof core>['overrides']>,
+    curVal: string | undefined,
+    defVal: string | undefined,
+  ): boolean => {
+    const resolved = (ov[id]?.instruction ?? curVal ?? '').trim();
+    return Boolean(resolved && resolved !== (defVal ?? '').trim());
+  };
+
   let coreSection = '';
   if (isCompact && state.initialized) {
     const compactCoreItems: string[] = [];
+    const customCoreHints: string[] = [];
     if (!core?.scenePillLocked) {
       compactCoreItems.push('scene{location("Spot, Area"),time,date,weather,mins(int)}');
+      for (const [key, cur, def] of [
+        ['scene.location', core?.sceneLocationInstruction, defaultCore.sceneLocationInstruction],
+        ['scene.time', core?.sceneTimeInstruction, defaultCore.sceneTimeInstruction],
+        ['scene.date', core?.sceneDateInstruction, defaultCore.sceneDateInstruction],
+        ['scene.weather', core?.sceneWeatherInstruction, defaultCore.sceneWeatherInstruction],
+        ['scene.mins', core?.sceneTimeFlowInstruction, defaultCore.sceneTimeFlowInstruction],
+      ] as const) {
+        if (cur && cur.trim() !== (def ?? '').trim()) {
+          customCoreHints.push(`  • "${key}": ${clipAtWordBoundary(cur, 200)}`);
+        }
+      }
     } else {
       compactCoreItems.push('scene pill LOCKED (omit location/time/date/weather)');
     }
-    if (core?.trackSceneSummary !== false && !ov.scene_summary?.locked) compactCoreItems.push('scene.summary(1-sent)');
-    if (core?.trackPlayerAttire !== false && !ov.player_attire?.locked) compactCoreItems.push('player.attire');
-    if (core?.trackPlayerCondition !== false && !ov.player_condition?.locked) compactCoreItems.push('player.condition');
-    if (core?.trackPlayerAction && !ov.player_action?.locked) compactCoreItems.push('player.notableAction');
-    if (core?.trackPlaces !== false && !ov.places?.locked) compactCoreItems.push('zones[]/places[]/paths[] on new places');
-    if (core?.trackQuests !== false && !ov.quests?.locked) compactCoreItems.push('quests[] on change');
-    if (core?.trackDispatches !== false && !ov.dispatches?.locked) compactCoreItems.push('dispatches[] if offscreen');
-    if (core?.trackNpcConditions !== false && !ov.npc_conditions?.locked) compactCoreItems.push('characters[].conditions');
-    if (core?.trackNpcSecrets !== false && !ov.npc_secrets?.locked) compactCoreItems.push('characters[].secrets');
-    coreSection = `Core Keys (update only if changed): ${compactCoreItems.join(' | ')}`;
+
+    const pushCoreCompact = (
+      id: keyof NonNullable<NonNullable<typeof core>['overrides']>,
+      enabledFlag: boolean,
+      shortTag: string,
+      curInst: string | undefined,
+      defInst: string | undefined,
+    ) => {
+      if (!isCoreEnabled(id, enabledFlag)) return;
+      compactCoreItems.push(shortTag);
+      if (isCustomCoreInst(id, curInst, defInst)) {
+        customCoreHints.push(`  • "${shortTag}": ${clipAtWordBoundary(resolveCoreInst(id, curInst), 200)}`);
+      }
+    };
+
+    pushCoreCompact('scene_summary', core?.trackSceneSummary !== false, 'scene.summary(1-sent)', core?.sceneSummaryInstruction, defaultCore.sceneSummaryInstruction);
+    pushCoreCompact('player_attire', core?.trackPlayerAttire !== false, 'player.attire', core?.playerAttireInstruction, defaultCore.playerAttireInstruction);
+    pushCoreCompact('player_condition', core?.trackPlayerCondition !== false, 'player.condition', core?.playerConditionInstruction, defaultCore.playerConditionInstruction);
+    pushCoreCompact('player_action', Boolean(core?.trackPlayerAction), 'player.notableAction', core?.playerActionInstruction, defaultCore.playerActionInstruction);
+    pushCoreCompact('places', core?.trackPlaces !== false, 'zones[]/places[]/paths[] on new places', core?.placesInstruction, defaultCore.placesInstruction);
+    pushCoreCompact('quests', core?.trackQuests !== false, 'quests[] on change', core?.questsInstruction, defaultCore.questsInstruction);
+    pushCoreCompact('dispatches', core?.trackDispatches !== false, 'dispatches[] if offscreen', core?.dispatchesInstruction, defaultCore.dispatchesInstruction);
+    pushCoreCompact('npc_conditions', core?.trackNpcConditions !== false, 'characters[].conditions', core?.npcConditionsInstruction, defaultCore.npcConditionsInstruction);
+    pushCoreCompact('npc_secrets', core?.trackNpcSecrets !== false, 'characters[].secrets', core?.npcSecretsInstruction, defaultCore.npcSecretsInstruction);
+
+    coreSection = [
+      `Core Keys (update only if changed): ${compactCoreItems.join(' | ')}`,
+      ...customCoreHints,
+    ].join('\n');
   } else {
     const scenePillHints = !core?.scenePillLocked
       ? [
@@ -844,33 +919,33 @@ export function compileExtractorPrompt(
 
     const corePromptHints = [
       ...scenePillHints,
-      core?.trackPlayerAttire !== false && !ov.player_attire?.locked && resolveCoreInst('player_attire', core?.playerAttireInstruction)
+      isCoreEnabled('player_attire', core?.trackPlayerAttire !== false) && resolveCoreInst('player_attire', core?.playerAttireInstruction)
         ? `  • "player.attire": ${clipAtWordBoundary(resolveCoreInst('player_attire', core?.playerAttireInstruction), 200)}`
         : '',
-      core?.trackPlayerCondition !== false && !ov.player_condition?.locked && resolveCoreInst('player_condition', core?.playerConditionInstruction)
+      isCoreEnabled('player_condition', core?.trackPlayerCondition !== false) && resolveCoreInst('player_condition', core?.playerConditionInstruction)
         ? `  • "player.condition": ${clipAtWordBoundary(resolveCoreInst('player_condition', core?.playerConditionInstruction), 200)}`
         : '',
-      core?.trackPlayerAction && !ov.player_action?.locked && resolveCoreInst('player_action', core?.playerActionInstruction)
+      isCoreEnabled('player_action', Boolean(core?.trackPlayerAction)) && resolveCoreInst('player_action', core?.playerActionInstruction)
         ? `  • "player.notableAction": ${clipAtWordBoundary(resolveCoreInst('player_action', core?.playerActionInstruction), 200)}`
         : '',
-      core?.trackSceneSummary !== false && !ov.scene_summary?.locked && resolveCoreInst('scene_summary', core?.sceneSummaryInstruction)
+      isCoreEnabled('scene_summary', core?.trackSceneSummary !== false) && resolveCoreInst('scene_summary', core?.sceneSummaryInstruction)
         ? `  • "scene.summary": ${clipAtWordBoundary(resolveCoreInst('scene_summary', core?.sceneSummaryInstruction), 200)}`
         : '',
-      core?.trackPlaces !== false && !ov.places?.locked && resolveCoreInst('places', core?.placesInstruction)
+      isCoreEnabled('places', core?.trackPlaces !== false) && resolveCoreInst('places', core?.placesInstruction)
         ? `  • "places[]/zones[]": ${clipAtWordBoundary(resolveCoreInst('places', core?.placesInstruction), 200)}`
         : '',
-      core?.trackQuests !== false && !ov.quests?.locked && resolveCoreInst('quests', core?.questsInstruction)
+      isCoreEnabled('quests', core?.trackQuests !== false) && resolveCoreInst('quests', core?.questsInstruction)
         ? `  • "quests[]": ${clipAtWordBoundary(resolveCoreInst('quests', core?.questsInstruction), 200)}`
         : '',
-      core?.trackDispatches !== false && !ov.dispatches?.locked && resolveCoreInst('dispatches', core?.dispatchesInstruction)
+      isCoreEnabled('dispatches', core?.trackDispatches !== false) && resolveCoreInst('dispatches', core?.dispatchesInstruction)
         ? `  • "dispatches[]": ${clipAtWordBoundary(resolveCoreInst('dispatches', core?.dispatchesInstruction), 200)}`
         : '',
-      core?.trackNpcConditions === false || ov.npc_conditions?.locked
+      !isCoreEnabled('npc_conditions', core?.trackNpcConditions !== false)
         ? '  • Skip character conditions[].'
         : resolveCoreInst('npc_conditions', core?.npcConditionsInstruction)
           ? `  • "characters[].conditions": ${clipAtWordBoundary(resolveCoreInst('npc_conditions', core?.npcConditionsInstruction), 180)}`
           : '',
-      core?.trackNpcSecrets === false || ov.npc_secrets?.locked
+      !isCoreEnabled('npc_secrets', core?.trackNpcSecrets !== false)
         ? '  • Skip character secrets[].'
         : resolveCoreInst('npc_secrets', core?.npcSecretsInstruction)
           ? `  • "characters[].secrets": ${clipAtWordBoundary(resolveCoreInst('npc_secrets', core?.npcSecretsInstruction), 180)}`
@@ -879,20 +954,31 @@ export function compileExtractorPrompt(
     coreSection = corePromptHints.length ? `Core & Scene Pill Rules:\n${corePromptHints.join('\n')}` : '';
   }
 
+  const defaultFieldInstMap = new Map(defaultDossierFields().map(df => [df.id, df.instruction.trim()]));
   let dossierSection = '';
   if (isCompact && state.initialized) {
-    const defKeys = editedDefaultFields.map(f => f.id);
-    const customHints = customDossierFields.map(f => `"${f.id}" (${clipAtWordBoundary(f.instruction, 140)})`);
+    const unchangedDefKeys: string[] = [];
+    const customOrEditedHints: string[] = [];
+    for (const f of editedDefaultFields) {
+      if (f.instruction.trim() !== (defaultFieldInstMap.get(f.id) ?? '')) {
+        customOrEditedHints.push(`"${f.id}" (${clipAtWordBoundary(f.instruction, 160)})`);
+      } else {
+        unchangedDefKeys.push(f.id);
+      }
+    }
+    for (const f of customDossierFields) {
+      customOrEditedHints.push(`"${f.id}" (${clipAtWordBoundary(f.instruction, 160)})`);
+    }
     const parts = [
-      defKeys.length ? `keys: ${defKeys.join(', ')}` : '',
-      ...customHints,
+      unchangedDefKeys.length ? `keys: ${unchangedDefKeys.join(', ')}` : '',
+      ...customOrEditedHints,
     ].filter(Boolean);
     if (parts.length) {
       dossierSection = `Dossier Fields (omit unchanged): ${parts.join(' | ')}`;
     }
   } else {
     const dossierHints = [
-      ...editedDefaultFields.map(f => `"${f.id}" (${clipAtWordBoundary(f.instruction, 130)})`),
+      ...editedDefaultFields.map(f => `"${f.id}" (${clipAtWordBoundary(f.instruction, 160)})`),
       ...customDossierFields.map(f => `"${f.id}" (${clipAtWordBoundary(f.instruction, 160)})`),
     ];
     if (dossierHints.length) {

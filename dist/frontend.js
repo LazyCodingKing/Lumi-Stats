@@ -337,6 +337,7 @@ function defaultCoreTrackersConfig() {
     trackPlayerAction: false,
     playerActionLabel: "Latest Notable Action",
     playerActionInstruction: "Summarize the player character’s most consequential current action.",
+    showPlayerActionCard: true,
     trackSceneSummary: true,
     sceneSummaryLabel: "Scene Beat Summary",
     sceneSummaryInstruction: "Concise 1-sentence summary of what just happened in the scene.",
@@ -8504,6 +8505,7 @@ var BUILTIN_TRACKER_META = {
     toggleKey: "trackPlayerAction",
     labelKey: "playerActionLabel",
     instructionKey: "playerActionInstruction",
+    showCardKey: "showPlayerActionCard",
     supportsCardDisplay: true
   },
   scene_summary: {
@@ -8580,7 +8582,8 @@ function resolveBuiltInTrackerConfig(core, id) {
     widgetTabId: ov.widgetTabId ?? (id === "quests" || id === "dispatches" ? "world" : "stats"),
     inlineTabId: ov.inlineTabId ?? (id === "quests" || id === "dispatches" ? "world" : "stats"),
     pinnedToHeader: Boolean(ov.pinnedToHeader),
-    locked: Boolean(ov.locked)
+    locked: Boolean(ov.locked),
+    deleted: Boolean(ov.deleted)
   };
 }
 function openScenePillEditorModal(ctrl) {
@@ -8673,11 +8676,16 @@ function openScenePillEditorModal(ctrl) {
       weatherArea.value = defaults.sceneWeatherInstruction ?? "";
       flowArea.value = defaults.sceneTimeFlowInstruction ?? "";
     }, "ls-btn-sm"), btn("\uD83D\uDCBE Save Scene Pill Config", () => {
+      const liveTpl = structuredClone(ctrl.snapshot.template);
+      const liveCore = {
+        ...defaults,
+        ...liveTpl.coreTrackers ?? {}
+      };
       ctrl.request("state:mutate", {
         templatePatch: {
-          theme: { ...tpl.theme, showSceneChips: chips },
+          theme: { ...liveTpl.theme, showSceneChips: chips },
           coreTrackers: {
-            ...core,
+            ...liveCore,
             scenePillLocked: locked,
             sceneLocationInstruction: locArea.value.trim(),
             sceneTimeInstruction: timeArea.value.trim(),
@@ -8892,7 +8900,8 @@ function openBuiltinTrackerModal(ctrl, id) {
     promptBody.append(promptHead, promptArea);
     const footer = el("div", "ls-row-between");
     footer.style.marginTop = "12px";
-    footer.append(btn("↺ Reset Default", () => {
+    const leftBtns = el("div", "ls-row");
+    leftBtns.append(btn("↺ Reset Default", () => {
       iconInp.value = meta.defaultIcon;
       labelInp.value = meta.defaultLabel;
       promptArea.value = String(defaults[meta.instructionKey] ?? "");
@@ -8900,17 +8909,57 @@ function openBuiltinTrackerModal(ctrl, id) {
       selectedStyle = "auto";
       selectedSpan = "full";
       syncSwatches();
-    }, "ls-btn-sm"), btn("\uD83D\uDCBE Save Built-In Tracker", () => {
+    }, "ls-btn-sm"), btn("\uD83D\uDDD1️ Delete Built-In", async () => {
+      const ok = await ctrl.modals.confirm({
+        title: `Remove "${meta.defaultLabel}"?`,
+        message: `Disable and remove "${meta.defaultLabel}" from active tracking and Studio? (You can restore deleted built-ins anytime from Studio.)`,
+        confirmLabel: "Delete",
+        variant: "danger"
+      });
+      if (!ok)
+        return;
+      const liveTpl = structuredClone(ctrl.snapshot.template);
+      const liveCore = {
+        ...defaults,
+        ...liveTpl.coreTrackers ?? {},
+        overrides: { ...liveTpl.coreTrackers?.overrides ?? {} }
+      };
+      const nextCore = {
+        ...liveCore,
+        [meta.toggleKey]: false,
+        ...meta.showCardKey ? { [meta.showCardKey]: false } : {},
+        overrides: {
+          ...liveCore.overrides ?? {},
+          [id]: {
+            ...liveCore.overrides?.[id] ?? {},
+            deleted: true
+          }
+        }
+      };
+      ctrl.request("state:mutate", {
+        templatePatch: { coreTrackers: nextCore },
+        reason: `Deleted built-in tracker "${meta.defaultLabel}"`
+      });
+      ctrl.notify(`Removed "${meta.defaultLabel}".`);
+      close();
+    }, "ls-btn-sm ls-btn-danger"));
+    footer.append(leftBtns, btn("\uD83D\uDCBE Save Built-In Tracker", () => {
       const nextLabel = labelInp.value.trim() || meta.defaultLabel;
       const nextInst = promptArea.value.trim();
+      const liveTpl = structuredClone(ctrl.snapshot.template);
+      const liveCore = {
+        ...defaults,
+        ...liveTpl.coreTrackers ?? {},
+        overrides: { ...liveTpl.coreTrackers?.overrides ?? {} }
+      };
       const nextCore = {
-        ...core,
+        ...liveCore,
         [meta.toggleKey]: enabled,
         ...meta.labelKey ? { [meta.labelKey]: nextLabel } : {},
         [meta.instructionKey]: nextInst,
         ...meta.showCardKey ? { [meta.showCardKey]: showCard } : {},
         overrides: {
-          ...core.overrides ?? {},
+          ...liveCore.overrides ?? {},
           [id]: {
             icon: iconInp.value.trim() || meta.defaultIcon,
             label: nextLabel,
@@ -8920,7 +8969,8 @@ function openBuiltinTrackerModal(ctrl, id) {
             layoutSpan: selectedSpan,
             widgetTabId: selectedWTab,
             inlineTabId: selectedITab,
-            locked
+            locked,
+            deleted: false
           }
         }
       };
@@ -10972,6 +11022,20 @@ Supports: + - * / %, round(), floor(), ceil(), min(), max(), clamp(), if(), hasC
             spanCtrl.setValue("full");
           }
         }
+        if (!existing) {
+          if (selectedKind === "clock")
+            maxInp.value = "6";
+          else if (selectedKind === "pips" || selectedKind === "hearts")
+            maxInp.value = "5";
+          else if (selectedKind === "attributes")
+            maxInp.value = "20";
+          else if (selectedKind === "currency")
+            maxInp.value = "99999999";
+          else if (selectedKind === "meter" && ["5", "6"].includes(maxInp.value.trim()))
+            maxInp.value = "100";
+        } else if (["clock", "pips", "hearts"].includes(selectedKind) && Number(maxInp.value) === 100) {
+          maxInp.value = selectedKind === "clock" ? "6" : "5";
+        }
         if (["text", "tags", "tier"].includes(selectedKind) && defInp.value.trim() === "0") {
           defInp.value = "";
         }
@@ -11153,10 +11217,28 @@ Supports: + - * / %, round(), floor(), ceil(), min(), max(), clamp(), if(), hasC
     const footerRow = el("div", "ls-row-between");
     footerRow.style.marginTop = "12px";
     if (existing) {
-      footerRow.append(btn("Duplicate to Another Tab…", () => {
+      const leftActions = el("div", "ls-row");
+      leftActions.append(btn("Duplicate to Another Tab…", () => {
         close();
         openDuplicateStatModal(ctrl, existing);
-      }, "ls-btn-sm"), saveBtn);
+      }, "ls-btn-sm"), btn("\uD83D\uDDD1️ Delete Stat", async () => {
+        const ok = await ctrl.modals.confirm({
+          title: `Delete "${existing.label}"?`,
+          message: `Remove "${existing.icon} ${existing.label}" from the active template and stop tracking it?`,
+          confirmLabel: "Delete",
+          variant: "danger"
+        });
+        if (!ok)
+          return;
+        const liveTpl = structuredClone(ctrl.snapshot.template);
+        ctrl.request("state:mutate", {
+          templatePatch: { stats: liveTpl.stats.filter((s) => s.id !== existing.id) },
+          reason: `Deleted stat "${existing.label}"`
+        });
+        ctrl.notify(`Deleted "${existing.icon} ${existing.label}".`);
+        close();
+      }, "ls-btn-sm ls-btn-danger"));
+      footerRow.append(leftActions, saveBtn);
     } else {
       footerRow.append(el("span"), saveBtn);
     }
@@ -11674,11 +11756,13 @@ function renderWorldQuestsAndDispatches(ctrl) {
   const { state, template } = ctrl.snapshot;
   const core = template.coreTrackers;
   const wrap = el("div", "ls-stack");
+  const qCfg = resolveBuiltInTrackerConfig(core, "quests");
+  const dCfg = resolveBuiltInTrackerConfig(core, "dispatches");
   const quests = Object.values(state.quests);
-  if (core?.trackQuests !== false && core?.showQuestsInWidget !== false && quests.length > 0) {
+  if (qCfg.enabled && !qCfg.deleted && core?.showQuestsInWidget !== false && quests.length > 0) {
     const qCard = el("div", "ls-stat-cell");
     qCard.dataset.span = "full";
-    qCard.append(el("strong", "", `\uD83C\uDFAF Quests & Objectives (${quests.filter((q) => q.status === "active").length})`));
+    qCard.append(el("strong", "", `${qCfg.icon || "\uD83C\uDFAF"} ${qCfg.label} (${quests.filter((q) => q.status === "active").length})`));
     for (const q of quests) {
       const box = el("div", "ls-stack");
       box.style.gap = "3px";
@@ -11704,10 +11788,10 @@ function renderWorldQuestsAndDispatches(ctrl) {
     }
     wrap.append(qCard);
   }
-  if (core?.trackDispatches !== false && core?.showDispatchesInWidget !== false && state.dispatches.length > 0) {
+  if (dCfg.enabled && !dCfg.deleted && core?.showDispatchesInWidget !== false && state.dispatches.length > 0) {
     const dCard = el("div", "ls-stat-cell");
     dCard.dataset.span = "full";
-    dCard.append(el("strong", "", `\uD83D\uDCE1 Off-Screen Dispatches (${state.dispatches.length})`));
+    dCard.append(el("strong", "", `${dCfg.icon || "\uD83D\uDCE1"} ${dCfg.label} (${state.dispatches.length})`));
     for (const disp of [...state.dispatches].reverse().slice(0, 3)) {
       const item = el("div", "ls-bond-dir-box");
       item.append(el("strong", "", `${disp.title} · \uD83D\uDCCD ${disp.locationName}`), el("small", "ls-muted", disp.summary));
@@ -13857,7 +13941,15 @@ function renderStudioStatsTab(ctrl, compScope, tpl, saveTemplatePatch, forceRedr
       left.append(swSlot, el("strong", "", `${schema.icon} ${schema.label}`), el("span", "ls-chip", `${scopeLabel} · ${typeLabel}`), el("span", `ls-chip ${modeBadge !== "\uD83E\uDD16 AI" ? "ls-chip-accent" : ""}`, modeBadge), ...schema.promptTriggerMode === "conditional" ? [el("span", "ls-chip", "\uD83D\uDD0D Conditional")] : [], ...schema.pinnedToHeader ? [el("span", "ls-chip ls-chip-accent", "Pinned")] : [], ...schema.locked ? [el("span", "ls-chip", "\uD83D\uDD12")] : []);
       const right = el("div", "ls-row");
       right.style.flex = "none";
-      right.append(btn("Full Edit", () => openStatSchemaModal(ctrl, schema.scope, schema), "ls-btn-sm"), iconBtn("more", async (e) => {
+      right.append(btn("Full Edit", () => openStatSchemaModal(ctrl, schema.scope, schema), "ls-btn-sm"), iconBtn("trash", () => {
+        saveTemplatePatch((live) => ({
+          stats: live.stats.filter((s) => s.id !== schema.id)
+        }), `Deleted stat "${schema.label}"`);
+        ctrl.notify(`Deleted "${schema.icon} ${schema.label}".`);
+      }, {
+        className: "ls-btn-sm ls-btn-icon ls-btn-ghost ls-btn-danger",
+        title: `Delete "${schema.label}"`
+      }), iconBtn("more", async (e) => {
         if (typeof ctrl.ctx.ui?.showContextMenu !== "function") {
           openStatSchemaModal(ctrl, schema.scope, schema);
           return;
@@ -13972,6 +14064,7 @@ function renderStudioStatsTab(ctrl, compScope, tpl, saveTemplatePatch, forceRedr
       }
       listHost.append(statCard);
     }
+    const deletedBuiltinsCount = BUILTIN_IDS.filter((item) => Boolean(tpl.coreTrackers?.overrides?.[item.id]?.deleted)).length;
     const filteredBuiltins = BUILTIN_IDS.filter((item) => {
       if (activeStatsFilter === "dossier")
         return false;
@@ -13979,12 +14072,55 @@ function renderStudioStatsTab(ctrl, compScope, tpl, saveTemplatePatch, forceRedr
         return false;
       }
       const cfg = resolveBuiltInTrackerConfig(tpl.coreTrackers, item.id);
+      if (cfg.deleted)
+        return false;
       return matchesQuery(`${item.id} ${cfg.label} ${cfg.instruction}`);
     });
-    if (filteredBuiltins.length > 0) {
+    if (filteredBuiltins.length > 0 || deletedBuiltinsCount > 0 && (activeStatsFilter === "all" || activeStatsFilter === "builtin")) {
       const builtCard = el("section", "ls-card");
-      builtCard.append(el("div", "ls-row-between"));
-      builtCard.firstElementChild.append(el("h3", "", `Built-In Story Trackers (${filteredBuiltins.length})`), el("span", "ls-muted", "Editable labels, prompts, styles & tabs"));
+      const builtHead = el("div", "ls-row-between");
+      const builtRightHead = el("div", "ls-row");
+      if (deletedBuiltinsCount > 0) {
+        builtRightHead.append(btn(`↺ Restore Deleted (${deletedBuiltinsCount})`, () => {
+          saveTemplatePatch((live) => {
+            const nextOverrides = { ...live.coreTrackers?.overrides ?? {} };
+            for (const k of Object.keys(nextOverrides)) {
+              if (nextOverrides[k]?.deleted) {
+                nextOverrides[k] = { ...nextOverrides[k], deleted: false };
+              }
+            }
+            return {
+              coreTrackers: {
+                ...live.coreTrackers ?? {},
+                overrides: nextOverrides
+              }
+            };
+          }, "Restored deleted built-in trackers");
+        }, "ls-btn-sm ls-btn-ghost"));
+      } else {
+        builtRightHead.append(el("span", "ls-muted", "Editable labels, prompts, styles & tabs"));
+      }
+      builtHead.append(el("h3", "", `Built-In Story Trackers (${filteredBuiltins.length})`), builtRightHead);
+      builtCard.append(builtHead);
+      const toggleMap = {
+        player_attire: "trackPlayerAttire",
+        player_condition: "trackPlayerCondition",
+        player_action: "trackPlayerAction",
+        scene_summary: "trackSceneSummary",
+        places: "trackPlaces",
+        quests: "trackQuests",
+        dispatches: "trackDispatches",
+        npc_conditions: "trackNpcConditions",
+        npc_secrets: "trackNpcSecrets"
+      };
+      const showCardMap = {
+        player_attire: "showPlayerAttireCard",
+        player_condition: "showPlayerConditionCard",
+        player_action: "showPlayerActionCard",
+        scene_summary: "showSceneSummaryInWidget",
+        quests: "showQuestsInWidget",
+        dispatches: "showDispatchesInWidget"
+      };
       for (const item of filteredBuiltins) {
         const cfg = resolveBuiltInTrackerConfig(tpl.coreTrackers, item.id);
         const row = el("div", "ls-stat-row-compact");
@@ -13995,17 +14131,6 @@ function renderStudioStatsTab(ctrl, compScope, tpl, saveTemplatePatch, forceRedr
           checked: cfg.enabled,
           ariaLabel: `Toggle ${cfg.label}`,
           onChange: (on) => {
-            const toggleMap = {
-              player_attire: "trackPlayerAttire",
-              player_condition: "trackPlayerCondition",
-              player_action: "trackPlayerAction",
-              scene_summary: "trackSceneSummary",
-              places: "trackPlaces",
-              quests: "trackQuests",
-              dispatches: "trackDispatches",
-              npc_conditions: "trackNpcConditions",
-              npc_secrets: "trackNpcSecrets"
-            };
             saveTemplatePatch((live) => {
               const core = { ...live.coreTrackers ?? {} };
               core[toggleMap[item.id]] = on;
@@ -14015,7 +14140,28 @@ function renderStudioStatsTab(ctrl, compScope, tpl, saveTemplatePatch, forceRedr
         });
         left.append(swSlot, el("strong", "", `${cfg.icon || "\uD83D\uDCCA"} ${cfg.label}`), el("span", "ls-chip", "Built-In"), ...cfg.locked ? [el("span", "ls-chip", "\uD83D\uDD12")] : []);
         const right = el("div", "ls-row");
-        right.append(btn("Full Edit", () => openBuiltinTrackerModal(ctrl, item.id), "ls-btn-sm"));
+        right.append(btn("Full Edit", () => openBuiltinTrackerModal(ctrl, item.id), "ls-btn-sm"), iconBtn("trash", () => {
+          saveTemplatePatch((live) => {
+            const core = { ...live.coreTrackers ?? {} };
+            core[toggleMap[item.id]] = false;
+            const cardKey = showCardMap[item.id];
+            if (cardKey)
+              core[cardKey] = false;
+            const prevOv = core.overrides ?? {};
+            core.overrides = {
+              ...prevOv,
+              [item.id]: {
+                ...prevOv[item.id] ?? {},
+                deleted: true
+              }
+            };
+            return { coreTrackers: core };
+          }, `Deleted built-in tracker "${cfg.label}"`);
+          ctrl.notify(`Removed "${cfg.label}".`);
+        }, {
+          className: "ls-btn-sm ls-btn-icon ls-btn-ghost ls-btn-danger",
+          title: `Remove "${cfg.label}"`
+        }));
         row.append(left, right);
         builtCard.append(row);
       }
@@ -17154,9 +17300,10 @@ function openDossierFieldModal(ctrl, existing) {
     const leftBtns = el("div", "ls-row");
     if (existing) {
       leftBtns.append(btn("Delete Field", () => {
+        const liveFields = structuredClone(ctrl.snapshot.template.dossierFields);
         ctrl.request("state:mutate", {
           templatePatch: {
-            dossierFields: tpl.dossierFields.filter((f) => f.id !== existing.id)
+            dossierFields: liveFields.filter((f) => f.id !== existing.id)
           },
           reason: `Deleted dossier field "${existing.label}"`
         });
@@ -17167,6 +17314,7 @@ function openDossierFieldModal(ctrl, existing) {
       const label = labelInp.value.trim();
       if (!label)
         return;
+      const liveFields = structuredClone(ctrl.snapshot.template.dossierFields);
       const updated = {
         id: existing?.id ?? slugifyKey(label, "field"),
         label,
@@ -17182,13 +17330,13 @@ function openDossierFieldModal(ctrl, existing) {
         enabled,
         locked
       };
-      const idx = tpl.dossierFields.findIndex((f) => f.id === updated.id);
+      const idx = liveFields.findIndex((f) => f.id === updated.id);
       if (idx >= 0)
-        tpl.dossierFields[idx] = updated;
+        liveFields[idx] = updated;
       else
-        tpl.dossierFields.push(updated);
+        liveFields.push(updated);
       ctrl.request("state:mutate", {
-        templatePatch: { dossierFields: tpl.dossierFields },
+        templatePatch: { dossierFields: liveFields },
         reason: `Saved dossier field "${updated.label}"`
       });
       close();
@@ -17489,6 +17637,10 @@ function renderCastDossierSurface(ctrl, compScope) {
         if (!val)
           continue;
         const cell = el("div", "ls-stat-cell");
+        if (f.color)
+          cell.style.setProperty("--ls-bar-color", f.color);
+        if (f.layoutSpan && f.layoutSpan !== "auto")
+          cell.dataset.span = f.layoutSpan;
         const headRow = el("div", "ls-row-between");
         headRow.append(el("span", "ls-kicker", `${f.icon} ${f.label}`), btn("✏️", () => openDossierFieldModal(ctrl, f), "ls-btn-sm ls-btn-icon", `Customize "${f.label}" field`));
         cell.append(headRow, renderStructuredTextStatBody(val, f.displayStyle === "pills" ? "pill_list" : "auto"));
@@ -17701,7 +17853,9 @@ function renderCastDossierSurface(ctrl, compScope) {
           { key: "edit", label: `✏️ Edit "${schema.label}" Schema & Style` },
           { key: "duplicate", label: `\uD83D\uDCCB Duplicate "${schema.label}" to Another Scope / Tab…` },
           { key: "test", label: `\uD83E\uDDEA Test "${schema.label}" in Sandbox` },
-          { key: "audit", label: `\uD83D\uDCC8 View Shift History` }
+          { key: "audit", label: `\uD83D\uDCC8 View Shift History` },
+          { key: "div", label: "", type: "divider" },
+          { key: "delete", label: `\uD83D\uDDD1️ Delete "${schema.label}"`, danger: true }
         ], (selectedKey) => {
           if (selectedKey === "edit")
             openStatSchemaModal(ctrl, "character", schema);
@@ -17711,6 +17865,13 @@ function renderCastDossierSurface(ctrl, compScope) {
             openSandboxTesterModal(ctrl, schema.id);
           else if (selectedKey === "audit")
             openAuditLogModal(ctrl, activeActor.id);
+          else if (selectedKey === "delete") {
+            const liveTpl = structuredClone(ctrl.snapshot.template);
+            ctrl.request("state:mutate", {
+              templatePatch: { stats: liveTpl.stats.filter((s) => s.id !== schema.id) },
+              reason: `Deleted stat "${schema.label}"`
+            });
+          }
         });
         metersGrid.append(cell);
       }
@@ -18084,71 +18245,75 @@ function renderSurfaceCastRoster(ctrl, surface, tabId, onOpenDossier) {
 
 // src/frontend/surfaces/WorldAndCopilot.ts
 function renderWorldSurface(ctrl, compScope) {
-  const { state } = ctrl.snapshot;
+  const { state, template } = ctrl.snapshot;
   const wrap = el("div", "ls-stack");
+  const qCfg = resolveBuiltInTrackerConfig(template.coreTrackers, "quests");
+  const dCfg = resolveBuiltInTrackerConfig(template.coreTrackers, "dispatches");
   const worldStatsCard = el("section", "ls-card");
   worldStatsCard.append(renderStatGridSurface(ctrl, ["world", "scene"], compScope, true));
   wrap.append(worldStatsCard);
-  const quests = Object.values(state.quests);
-  const qCard = el("section", "ls-card");
-  const qHead = el("div", "ls-row-between");
-  qHead.append(el("h3", "", `\uD83C\uDFAF Quests & Objectives (${quests.filter((q) => q.status === "active").length})`), btn("+ Add Quest", () => {
-    ctrl.modals.open({ title: "➕ Add Quest or Goal", width: 460 }, (body, close) => {
-      const tWrap = el("label", "ls-label", "Quest Title");
-      const tInp = el("input", "ls-input");
-      tWrap.append(tInp);
-      const oWrap = el("label", "ls-label", "Objectives (one per line)");
-      const oInp = el("textarea", "ls-input");
-      oInp.rows = 3;
-      oWrap.append(oInp);
-      const save = btn("➕ Save Quest", () => {
-        const title = tInp.value.trim();
-        if (!title)
-          return;
-        const objectives = oInp.value.split(`
+  if (qCfg.enabled && !qCfg.deleted) {
+    const quests = Object.values(state.quests);
+    const qCard = el("section", "ls-card");
+    const qHead = el("div", "ls-row-between");
+    qHead.append(el("h3", "", `${qCfg.icon || "\uD83C\uDFAF"} ${qCfg.label} (${quests.filter((q) => q.status === "active").length})`), btn("+ Add Quest", () => {
+      ctrl.modals.open({ title: "➕ Add Quest or Goal", width: 460 }, (body, close) => {
+        const tWrap = el("label", "ls-label", "Quest Title");
+        const tInp = el("input", "ls-input");
+        tWrap.append(tInp);
+        const oWrap = el("label", "ls-label", "Objectives (one per line)");
+        const oInp = el("textarea", "ls-input");
+        oInp.rows = 3;
+        oWrap.append(oInp);
+        const save = btn("➕ Save Quest", () => {
+          const title = tInp.value.trim();
+          if (!title)
+            return;
+          const objectives = oInp.value.split(`
 `).map((s) => s.trim()).filter(Boolean).map((text) => ({ text, completed: false }));
-        ctrl.request("state:mutate", {
-          patch: {
-            quests: [{ title, status: "active", objectives }]
-          },
-          reason: `Added quest "${title}"`
-        });
-        close();
-      }, "ls-btn-primary");
-      body.append(tWrap, oWrap, save);
-    });
-  }, "ls-btn-sm ls-btn-primary"));
-  qCard.append(qHead);
-  if (!quests.length) {
-    qCard.append(el("p", "ls-muted", "No active quests recorded yet."));
-  } else {
-    for (const q of quests) {
-      const box = el("div", "ls-stat-cell");
-      box.append(el("strong", "", `\uD83C\uDFAF ${q.title} (${q.status})`));
-      for (const [idx, obj] of q.objectives.entries()) {
-        const row = el("label", "ls-row");
-        const chk = el("input");
-        chk.type = "checkbox";
-        chk.checked = obj.completed;
-        chk.addEventListener("change", () => {
-          const nextObjs = q.objectives.map((o, i) => i === idx ? { ...o, completed: chk.checked } : o);
-          const allDone = nextObjs.every((o) => o.completed);
           ctrl.request("state:mutate", {
             patch: {
-              quests: [{ id: q.id, title: q.title, status: allDone ? "completed" : "active", objectives: nextObjs }]
-            }
+              quests: [{ title, status: "active", objectives }]
+            },
+            reason: `Added quest "${title}"`
           });
-        });
-        row.append(chk, el("span", obj.completed ? "ls-muted" : "", obj.text));
-        box.append(row);
+          close();
+        }, "ls-btn-primary");
+        body.append(tWrap, oWrap, save);
+      });
+    }, "ls-btn-sm ls-btn-primary"));
+    qCard.append(qHead);
+    if (!quests.length) {
+      qCard.append(el("p", "ls-muted", "No active quests recorded yet."));
+    } else {
+      for (const q of quests) {
+        const box = el("div", "ls-stat-cell");
+        box.append(el("strong", "", `\uD83C\uDFAF ${q.title} (${q.status})`));
+        for (const [idx, obj] of q.objectives.entries()) {
+          const row = el("label", "ls-row");
+          const chk = el("input");
+          chk.type = "checkbox";
+          chk.checked = obj.completed;
+          chk.addEventListener("change", () => {
+            const nextObjs = q.objectives.map((o, i) => i === idx ? { ...o, completed: chk.checked } : o);
+            const allDone = nextObjs.every((o) => o.completed);
+            ctrl.request("state:mutate", {
+              patch: {
+                quests: [{ id: q.id, title: q.title, status: allDone ? "completed" : "active", objectives: nextObjs }]
+              }
+            });
+          });
+          row.append(chk, el("span", obj.completed ? "ls-muted" : "", obj.text));
+          box.append(row);
+        }
+        qCard.append(box);
       }
-      qCard.append(box);
     }
+    wrap.append(qCard);
   }
-  wrap.append(qCard);
-  if (state.dispatches.length > 0) {
+  if (dCfg.enabled && !dCfg.deleted && state.dispatches.length > 0) {
     const dCard = el("section", "ls-card");
-    dCard.append(el("h3", "", `\uD83D\uDCE1 Meanwhile / Off-Screen Dispatches (${state.dispatches.length})`));
+    dCard.append(el("h3", "", `${dCfg.icon || "\uD83D\uDCE1"} ${dCfg.label} (${state.dispatches.length})`));
     for (const disp of [...state.dispatches].reverse().slice(0, 6)) {
       const cell = el("div", "ls-stat-cell");
       const top = el("div", "ls-row-between");
@@ -18450,7 +18615,8 @@ function mountLumiStats(ctx) {
         const topRow = el("div", "ls-row-between");
         topRow.append(renderSceneHeaderChips(ctrl), btn("✏️ Edit Scene", () => openSceneBannerModal(ctrl), "ls-btn-sm"));
         sceneCard.append(topRow);
-        if (state.scene.beatSummary) {
+        const coreTrackers = ctrl.snapshot.template.coreTrackers;
+        if (state.scene.beatSummary && coreTrackers?.trackSceneSummary !== false && !coreTrackers?.overrides?.scene_summary?.deleted) {
           sceneCard.append(el("p", "ls-muted", state.scene.beatSummary));
         }
         body.append(sceneCard);

@@ -237,8 +237,15 @@ export class LumiStatsService {
               calibrated: false,
               locked: def.locked,
             };
-          } else if (isTextDef && typeof curM.value === 'number') {
-            curM.value = typeof def.defaultValue === 'string' ? def.defaultValue : String(curM.value);
+          } else {
+            curM.locked = def.locked;
+            if (!curM.calibrated) {
+              curM.value = def.defaultValue;
+            } else if (isTextDef && typeof curM.value === 'number') {
+              curM.value = typeof def.defaultValue === 'string' ? def.defaultValue : String(curM.value);
+            } else if (!isTextDef && typeof curM.value === 'number') {
+              curM.value = Math.max(def.min, Math.min(def.max, curM.value));
+            }
           }
         }
         continue;
@@ -256,7 +263,9 @@ export class LumiStatsService {
       } else {
         existing.scope = def.scope;
         existing.locked = def.locked;
-        if (isTextDef && typeof existing.value === 'number') {
+        if (!existing.calibrated) {
+          existing.value = def.defaultValue;
+        } else if (isTextDef && typeof existing.value === 'number') {
           existing.value = typeof def.defaultValue === 'string' ? def.defaultValue : String(existing.value);
         } else if (!isTextDef && typeof existing.value === 'number') {
           existing.value = Math.max(def.min, Math.min(def.max, existing.value));

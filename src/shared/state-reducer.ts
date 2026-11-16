@@ -3,6 +3,8 @@ import { cleanBrailleAndProseWhitespace } from './prose-cleaner';
 import { createStatSchema, slugifyKey } from './templates';
 import type {
   BondCategory,
+  BuiltInTrackerConfig,
+  BuiltInTrackerId,
   CampaignState,
   CharacterRecord,
   ExtractedTurnPatch,
@@ -278,9 +280,59 @@ function inferInitialPeerBondMeters(
   return { affinity: 50, trust: 50 };
 }
 
+function parseNumericStringMutation(
+  trimmed: string,
+  explicitOp: 'set' | 'delta',
+  reason?: string,
+): NormalizedMutation | null {
+  if (!trimmed || trimmed === '∅') return null;
+
+  const signedExact = trimmed.match(/^([+-])\s*(\d+(?:\.\d+)?)\s*%?$/);
+  if (signedExact) {
+    const num = Number(`${signedExact[1]}${signedExact[2]}`);
+    return Number.isFinite(num) ? { op: 'delta', value: num, reason } : null;
+  }
+
+  const signedWithNote = trimmed.match(
+    /^([+-])\s*(\d+(?:\.\d+)?)\s*%?(?:\s*[\(\[—–\-:]\s*([^)\]]+)\)?)$/,
+  );
+  if (signedWithNote) {
+    const num = Number(`${signedWithNote[1]}${signedWithNote[2]}`);
+    const inlineReason = cleanStringValue(signedWithNote[3] ?? '');
+    return Number.isFinite(num)
+      ? { op: 'delta', value: num, reason: reason || inlineReason || undefined }
+      : null;
+  }
+
+  const fractionMatch = trimmed.match(/^(-?\d+(?:\.\d+)?)\s*\/\s*\d+(?:\.\d+)?$/);
+  if (fractionMatch) {
+    const num = Number(fractionMatch[1]);
+    return Number.isFinite(num) ? { op: 'set', value: num, reason } : null;
+  }
+
+  const plainNum = Number(trimmed);
+  if (Number.isFinite(plainNum)) {
+    return { op: explicitOp, value: plainNum, reason };
+  }
+
+  const numWithNote = trimmed.match(
+    /^(-?\d+(?:\.\d+)?)\s*%?(?:\s*[\(\[—–\-]\s*([^)\]]+)\)?)$/,
+  );
+  if (numWithNote) {
+    const num = Number(numWithNote[1]);
+    const inlineReason = cleanStringValue(numWithNote[2] ?? '');
+    return Number.isFinite(num)
+      ? { op: explicitOp, value: num, reason: reason || inlineReason || undefined }
+      : null;
+  }
+
+  return null;
+}
+
 function normalizeStatMutation(
   rawInput: unknown,
-  alreadyCalibrated: boolean,
+  _alreadyCalibrated: boolean,
+  isNumericTarget = false,
 ): NormalizedMutation | null {
   if (rawInput === null || rawInput === undefined) return null;
 
@@ -305,7 +357,7 @@ function normalizeStatMutation(
       return { op: 'set', value: JSON.stringify(rawInput) };
     }
     const rawVal = obj.value;
-    const explicitOp = obj.op === 'delta' && alreadyCalibrated ? 'delta' : 'set';
+    const explicitOp = obj.op === 'delta' ? 'delta' : 'set';
     const rawReasonStr = typeof obj.reason === 'string' ? cleanStringValue(obj.reason) : '';
     const cleanedReason =
       rawReasonStr && !/^(?:manual ui adjustment|manual dossier adjustment|scene progression)$/i.test(rawReasonStr)
@@ -315,19 +367,9 @@ function normalizeStatMutation(
     if (typeof rawVal === 'string') {
       const trimmed = cleanStringValue(rawVal);
       if (!trimmed || trimmed === '∅') return null;
-      const signedMatch = trimmed.match(/^([+-])(\d+(?:\.\d+)?)$/);
-      if (signedMatch) {
-        const num = Number(trimmed);
-        return {
-          op: alreadyCalibrated ? 'delta' : 'set',
-          value: alreadyCalibrated ? num : Math.abs(num),
-          reason: cleanedReason,
-        };
-      }
-      const plainNum = Number(trimmed);
-      if (Number.isFinite(plainNum)) {
-        return { op: explicitOp, value: plainNum, reason: cleanedReason };
-      }
+      const numericParsed = parseNumericStringMutation(trimmed, explicitOp, cleanedReason);
+      if (numericParsed) return numericParsed;
+      if (isNumericTarget) return null;
       return { op: 'set', value: trimmed, reason: cleanedReason };
     }
     return { op: explicitOp, value: rawVal, reason: cleanedReason };
@@ -336,18 +378,9 @@ function normalizeStatMutation(
   if (typeof rawInput === 'string') {
     const trimmed = cleanStringValue(rawInput);
     if (!trimmed || trimmed === '∅') return null;
-    const signedMatch = trimmed.match(/^([+-])(\d+(?:\.\d+)?)$/);
-    if (signedMatch) {
-      const num = Number(trimmed);
-      return {
-        op: alreadyCalibrated ? 'delta' : 'set',
-        value: alreadyCalibrated ? num : Math.abs(num),
-      };
-    }
-    const plainNum = Number(trimmed);
-    if (Number.isFinite(plainNum)) {
-      return { op: 'set', value: plainNum };
-    }
+    const numericParsed = parseNumericStringMutation(trimmed, 'set');
+    if (numericParsed) return numericParsed;
+    if (isNumericTarget) return null;
     return { op: 'set', value: trimmed };
   }
 
@@ -422,7 +455,17 @@ export function applyTurnPatch(
     next.elapsedMinutes += effectiveElapsed;
   }
 
-  const pillLocked = !bypassLocks && Boolean(template.coreTrackers?.scenePillLocked);
+  const coreCfg = template.coreTrackers;
+  const coreOv: Partial<Record<BuiltInTrackerId, BuiltInTrackerConfig>> = coreCfg?.overrides ?? {};
+  const isBuiltinWritable = (
+    id: BuiltInTrackerId,
+    enabledFlag: boolean,
+  ) => {
+    const ov = coreOv[id];
+    return bypassLocks || (enabledFlag && !ov?.locked && !ov?.deleted);
+  };
+
+  const pillLocked = !bypassLocks && Boolean(coreCfg?.scenePillLocked);
   if (sceneSource) {
     const loc = String(sceneSource.location ?? '').trim();
     const time = String(sceneSource.timeLabel ?? sceneSource.time ?? sceneSource.current_time ?? '').trim();
@@ -436,7 +479,7 @@ export function applyTurnPatch(
       if (date) next.scene.dateLabel = cleanStringValue(date);
       if (weather) next.scene.weather = cleanStringValue(weather);
     }
-    if (summary && (bypassLocks || !template.coreTrackers?.overrides?.scene_summary?.locked)) {
+    if (summary && isBuiltinWritable('scene_summary', coreCfg?.trackSceneSummary !== false)) {
       next.scene.beatSummary = cleanStringValue(summary);
     }
     if (loc || summary || time || date) {
@@ -450,9 +493,27 @@ export function applyTurnPatch(
   const extraStatBags: Array<Record<string, unknown>> = [];
   if (patch.player && typeof patch.player === 'object') {
     const pObj = patch.player as Record<string, unknown>;
-    if (typeof pObj.attire === 'string' && pObj.attire.trim()) next.player.attire = cleanStringValue(pObj.attire);
-    if (typeof pObj.condition === 'string' && pObj.condition.trim()) next.player.condition = cleanStringValue(pObj.condition);
-    if (typeof pObj.notableAction === 'string' && pObj.notableAction.trim()) next.player.notableAction = cleanStringValue(pObj.notableAction);
+    if (
+      typeof pObj.attire === 'string' &&
+      pObj.attire.trim() &&
+      isBuiltinWritable('player_attire', coreCfg?.trackPlayerAttire !== false)
+    ) {
+      next.player.attire = cleanStringValue(pObj.attire);
+    }
+    if (
+      typeof pObj.condition === 'string' &&
+      pObj.condition.trim() &&
+      isBuiltinWritable('player_condition', coreCfg?.trackPlayerCondition !== false)
+    ) {
+      next.player.condition = cleanStringValue(pObj.condition);
+    }
+    if (
+      typeof pObj.notableAction === 'string' &&
+      pObj.notableAction.trim() &&
+      isBuiltinWritable('player_action', Boolean(coreCfg?.trackPlayerAction))
+    ) {
+      next.player.notableAction = cleanStringValue(pObj.notableAction);
+    }
     const playerStatCandidates: Record<string, unknown> = {};
     for (const [pk, pv] of Object.entries(pObj)) {
       if (!['attire', 'condition', 'notableAction', 'name'].includes(pk) && pv !== undefined) {
@@ -508,31 +569,39 @@ export function applyTurnPatch(
     const existing = next.stats[schema.id];
     if (!bypassLocks && (schema.locked || existing?.locked)) return;
 
+    const isTextStyle =
+      Boolean(schema.displayStyle && schema.displayStyle !== 'auto') ||
+      ['text', 'tags', 'tier', 'skill_tree', 'xp_level', 'attributes', 'inventory', 'status_fx'].includes(schema.kind);
+    const isNumericStat =
+      !isTextStyle && ['meter', 'number', 'clock', 'pips', 'hearts', 'currency'].includes(schema.kind);
+
     const wasCalibrated = Boolean(existing?.calibrated);
-    const mutation = normalizeStatMutation(rawMutation, wasCalibrated);
+    const mutation = normalizeStatMutation(rawMutation, wasCalibrated, isNumericStat);
     if (!mutation) return;
 
     const prevValue = existing?.calibrated ? existing.value : null;
     let finalValue: number | string | boolean;
     let numericDelta = 0;
 
-    const isTextStyle =
-      Boolean(schema.displayStyle && schema.displayStyle !== 'auto') ||
-      ['text', 'tags', 'tier', 'skill_tree', 'xp_level', 'attributes', 'inventory', 'status_fx'].includes(schema.kind);
-
-    if (!isTextStyle && ['meter', 'number', 'clock', 'pips', 'hearts', 'currency'].includes(schema.kind) && Number.isFinite(Number(mutation.value))) {
+    if (isNumericStat && Number.isFinite(Number(mutation.value))) {
       const rawNum = Number(mutation.value);
       if (!Number.isFinite(rawNum)) return;
-      const baseNum =
-        wasCalibrated && typeof existing?.value === 'number'
+      const existingParsed =
+        typeof existing?.value === 'number'
           ? existing.value
+          : typeof existing?.value === 'string'
+            ? parseNumericStringMutation(existing.value, 'set')?.value
+            : undefined;
+      const baseNum =
+        wasCalibrated && typeof existingParsed === 'number'
+          ? existingParsed
           : typeof schema.defaultValue === 'number'
             ? schema.defaultValue
             : schema.min;
       const isIntKind = ['clock', 'pips', 'hearts', 'currency'].includes(schema.kind);
 
-      if (mutation.op === 'delta' && wasCalibrated) {
-        if (rawNum === 0) return;
+      if (mutation.op === 'delta') {
+        if (wasCalibrated && rawNum === 0) return;
         const computed = baseNum + rawNum;
         finalValue = Math.max(
           schema.min,
@@ -599,40 +668,37 @@ export function applyTurnPatch(
     const existing = char.meters[schema.id];
     if (!bypassLocks && (schema.locked || existing?.locked)) return;
 
+    const isCharTextStyle =
+      Boolean(schema.displayStyle && schema.displayStyle !== 'auto') ||
+      ['text', 'tags', 'tier', 'skill_tree', 'xp_level', 'attributes', 'inventory', 'status_fx'].includes(schema.kind);
+    const isCharNumeric =
+      !isCharTextStyle && ['meter', 'number', 'clock', 'pips', 'hearts', 'currency'].includes(schema.kind);
+
     const wasCalibrated = Boolean(existing?.calibrated);
-    const mutation = normalizeStatMutation(rawMutation, wasCalibrated);
+    const mutation = normalizeStatMutation(rawMutation, wasCalibrated, isCharNumeric);
     if (!mutation) return;
 
     const prevValue = wasCalibrated && existing ? existing.value : null;
     let finalValue: number | string | boolean;
     let numericDelta = 0;
 
-    const isCharTextStyle =
-      Boolean(schema.displayStyle && schema.displayStyle !== 'auto') ||
-      ['text', 'tags', 'tier', 'skill_tree', 'xp_level', 'attributes', 'inventory', 'status_fx'].includes(schema.kind);
-
-    if (!isCharTextStyle && ['meter', 'number', 'clock', 'pips', 'hearts', 'currency'].includes(schema.kind) && Number.isFinite(Number(mutation.value))) {
+    if (isCharNumeric && Number.isFinite(Number(mutation.value))) {
       const rawNum = Number(mutation.value);
-      const baseNum =
-        wasCalibrated && typeof existing?.value === 'number'
+      const existingParsed =
+        typeof existing?.value === 'number'
           ? existing.value
+          : typeof existing?.value === 'string'
+            ? parseNumericStringMutation(existing.value, 'set')?.value
+            : undefined;
+      const baseNum =
+        wasCalibrated && typeof existingParsed === 'number'
+          ? existingParsed
           : typeof schema.defaultValue === 'number'
             ? schema.defaultValue
-            : 0;
+            : schema.min;
 
-      if (
-        !bypassLocks &&
-        wasCalibrated &&
-        mutation.op === 'set' &&
-        rawNum === 0 &&
-        baseNum !== 0 &&
-        schema.volatility !== 'momentary'
-      ) {
-        return;
-      }
-
-      if (mutation.op === 'delta' && wasCalibrated) {
-        if (rawNum === 0) return;
+      if (mutation.op === 'delta') {
+        if (wasCalibrated && rawNum === 0) return;
         const computed = baseNum + rawNum;
         finalValue = Math.max(schema.min, Math.min(schema.max, Math.round(computed)));
       } else {
@@ -641,7 +707,7 @@ export function applyTurnPatch(
       numericDelta =
         typeof prevValue === 'number'
           ? finalValue - prevValue
-          : finalValue - (typeof schema.defaultValue === 'number' ? schema.defaultValue : 0);
+          : finalValue - (typeof schema.defaultValue === 'number' ? schema.defaultValue : schema.min);
       checkThresholdAlerts(schema, typeof prevValue === 'number' ? prevValue : undefined, finalValue, char.name);
     } else if (schema.kind === 'boolean') {
       finalValue = mutation.value === true || mutation.value === 1 || String(mutation.value).toLowerCase() === 'true';
@@ -825,8 +891,11 @@ export function applyTurnPatch(
       const goalVal = String(rawChar.immediateGoal ?? rawCharRec.goal ?? rawCharRec.aim ?? '').trim();
       const attireVal = String(rawChar.attire ?? rawCharRec.clothing ?? '').trim();
 
-      const isDossierFieldAllowed = (fid: string) =>
-        bypassLocks || template.dossierFields.find(f => f.id === fid)?.locked !== true;
+      const isDossierFieldAllowed = (fid: string) => {
+        if (bypassLocks) return true;
+        const found = template.dossierFields.find(f => f.id === fid);
+        return Boolean(found && found.enabled && !found.locked);
+      };
 
       if (roleVal && isDossierFieldAllowed('role_summary')) {
         char.roleSummary = cleanStringValue(roleVal);
@@ -851,7 +920,10 @@ export function applyTurnPatch(
       if (Array.isArray(rawChar.aliases)) {
         char.aliases = [...new Set([...char.aliases, ...rawChar.aliases.map(a => cleanStringValue(String(a)))])].slice(0, 12);
       }
-      if (Array.isArray(rawChar.conditions)) {
+      if (
+        Array.isArray(rawChar.conditions) &&
+        isBuiltinWritable('npc_conditions', coreCfg?.trackNpcConditions !== false)
+      ) {
         char.conditions = rawChar.conditions.map(c => cleanStringValue(String(c))).filter(Boolean).slice(0, 10);
       }
       if (typeof rawCharRec.notes === 'string') {
@@ -908,14 +980,23 @@ export function applyTurnPatch(
       }
       for (const [ck, cv] of Object.entries(rawCharRec)) {
         if (RESERVED_CHAR_KEYS.has(ck) || cv === null || cv === undefined) continue;
-        if (typeof cv === 'number' || typeof cv === 'boolean' || typeof cv === 'string') {
+        const isPatchObj =
+          typeof cv === 'object' && !Array.isArray(cv) && 'value' in (cv as Record<string, unknown>);
+        if (typeof cv === 'number' || typeof cv === 'boolean' || typeof cv === 'string' || isPatchObj) {
+          const matchedStat = matchStatSchema(template.stats, ck, 'character');
+          if (matchedStat) {
+            combinedMeters[ck] = cv as StatPatchInput | number | string | boolean;
+            continue;
+          }
           const matchedField = template.dossierFields.find(
             f => f.id === ck || slugifyKey(f.label, '') === slugifyKey(ck, ''),
           );
           if (matchedField && typeof cv === 'string') {
-            char.fields[matchedField.id] = cleanStringValue(cv).slice(0, 1000);
-          } else {
-            combinedMeters[ck] = cv;
+            if (bypassLocks || (matchedField.enabled && !matchedField.locked)) {
+              char.fields[matchedField.id] = cleanStringValue(cv).slice(0, 1000);
+            }
+          } else if (!matchedField) {
+            combinedMeters[ck] = cv as StatPatchInput | number | string | boolean;
           }
         }
       }
@@ -1060,7 +1141,10 @@ export function applyTurnPatch(
         }
       }
 
-      if (Array.isArray(rawChar.secrets)) {
+      if (
+        Array.isArray(rawChar.secrets) &&
+        isBuiltinWritable('npc_secrets', coreCfg?.trackNpcSecrets !== false)
+      ) {
         for (const sec of rawChar.secrets) {
           if (!sec?.title?.trim()) continue;
           const sid = slugifyKey(sec.id ?? sec.title, 'sec');
@@ -1222,7 +1306,9 @@ export function applyTurnPatch(
     }
   };
 
-  if (Array.isArray(patch.zones)) {
+  const placesWritable = isBuiltinWritable('places', coreCfg?.trackPlaces !== false);
+
+  if (placesWritable && Array.isArray(patch.zones)) {
     for (const rz of patch.zones) {
       if (!rz?.name?.trim()) continue;
       ensureZone(rz.name, {
@@ -1235,7 +1321,7 @@ export function applyTurnPatch(
     }
   }
 
-  if (next.scene.location) {
+  if (placesWritable && next.scene.location) {
     const locParts = next.scene.location
       .split(/\s*(?:,|—|–|\|)\s*/)
       .map(s => s.trim())
@@ -1282,7 +1368,7 @@ export function applyTurnPatch(
     }
   }
 
-  if (Array.isArray(patch.places)) {
+  if (placesWritable && Array.isArray(patch.places)) {
     for (const rp of patch.places) {
       if (!rp?.name?.trim()) continue;
       const pid = slugifyKey(rp.id ?? rp.name, 'place');
@@ -1339,7 +1425,7 @@ export function applyTurnPatch(
     }
   }
 
-  if (Array.isArray(patch.paths)) {
+  if (placesWritable && Array.isArray(patch.paths)) {
     const resolvePlaceByRef = (ref: string): string => {
       const clean = cleanStringValue(ref);
       const byExact = next.places[clean];
@@ -1377,7 +1463,10 @@ export function applyTurnPatch(
     }
   }
 
-  if (Array.isArray(patch.quests)) {
+  if (
+    Array.isArray(patch.quests) &&
+    isBuiltinWritable('quests', coreCfg?.trackQuests !== false)
+  ) {
     for (const rq of patch.quests) {
       if (!rq?.title?.trim()) continue;
       const qid = slugifyKey(rq.id ?? rq.title, 'quest');
@@ -1399,7 +1488,10 @@ export function applyTurnPatch(
     }
   }
 
-  if (Array.isArray(patch.dispatches)) {
+  if (
+    Array.isArray(patch.dispatches) &&
+    isBuiltinWritable('dispatches', coreCfg?.trackDispatches !== false)
+  ) {
     for (const rd of patch.dispatches) {
       if (!rd?.summary?.trim()) continue;
       next.dispatches.push({

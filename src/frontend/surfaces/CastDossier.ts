@@ -213,9 +213,10 @@ export function openDossierFieldModal(
       if (existing) {
         leftBtns.append(
           btn('Delete Field', () => {
+            const liveFields = structuredClone(ctrl.snapshot.template.dossierFields);
             void ctrl.request('state:mutate', {
               templatePatch: {
-                dossierFields: tpl.dossierFields.filter(f => f.id !== existing.id),
+                dossierFields: liveFields.filter(f => f.id !== existing.id),
               },
               reason: `Deleted dossier field "${existing.label}"`,
             });
@@ -227,6 +228,7 @@ export function openDossierFieldModal(
       const saveBtn = btn(existing ? 'Save Field' : 'Add Field', () => {
         const label = labelInp.value.trim();
         if (!label) return;
+        const liveFields = structuredClone(ctrl.snapshot.template.dossierFields);
         const updated: DossierFieldDef = {
           id: existing?.id ?? slugifyKey(label, 'field'),
           label,
@@ -242,12 +244,12 @@ export function openDossierFieldModal(
           enabled,
           locked,
         };
-        const idx = tpl.dossierFields.findIndex(f => f.id === updated.id);
-        if (idx >= 0) tpl.dossierFields[idx] = updated;
-        else tpl.dossierFields.push(updated);
+        const idx = liveFields.findIndex(f => f.id === updated.id);
+        if (idx >= 0) liveFields[idx] = updated;
+        else liveFields.push(updated);
 
         void ctrl.request('state:mutate', {
-          templatePatch: { dossierFields: tpl.dossierFields },
+          templatePatch: { dossierFields: liveFields },
           reason: `Saved dossier field "${updated.label}"`,
         });
         close();
@@ -675,6 +677,8 @@ export function renderCastDossierSurface(
         const val = resolveCharacterFieldValue(activeActor, f.id);
         if (!val) continue;
         const cell = el('div', 'ls-stat-cell');
+        if (f.color) cell.style.setProperty('--ls-bar-color', f.color);
+        if (f.layoutSpan && f.layoutSpan !== 'auto') cell.dataset.span = f.layoutSpan;
         const headRow = el('div', 'ls-row-between');
         headRow.append(
           el('span', 'ls-kicker', `${f.icon} ${f.label}`),
@@ -974,12 +978,21 @@ export function renderCastDossierSurface(
             { key: 'duplicate', label: `📋 Duplicate "${schema.label}" to Another Scope / Tab…` },
             { key: 'test', label: `🧪 Test "${schema.label}" in Sandbox` },
             { key: 'audit', label: `📈 View Shift History` },
+            { key: 'div', label: '', type: 'divider' },
+            { key: 'delete', label: `🗑️ Delete "${schema.label}"`, danger: true },
           ],
           selectedKey => {
             if (selectedKey === 'edit') openStatSchemaModal(ctrl, 'character', schema);
             else if (selectedKey === 'duplicate') openDuplicateStatModal(ctrl, schema);
             else if (selectedKey === 'test') openSandboxTesterModal(ctrl, schema.id);
             else if (selectedKey === 'audit') openAuditLogModal(ctrl, activeActor.id);
+            else if (selectedKey === 'delete') {
+              const liveTpl = structuredClone(ctrl.snapshot.template);
+              void ctrl.request('state:mutate', {
+                templatePatch: { stats: liveTpl.stats.filter(s => s.id !== schema.id) },
+                reason: `Deleted stat "${schema.label}"`,
+              });
+            }
           },
         );
 

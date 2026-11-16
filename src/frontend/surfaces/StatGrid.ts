@@ -1541,6 +1541,18 @@ export function openStatSchemaModal(
               spanCtrl.setValue('full');
             }
           }
+          if (!existing) {
+            if (selectedKind === 'clock') maxInp.value = '6';
+            else if (selectedKind === 'pips' || selectedKind === 'hearts') maxInp.value = '5';
+            else if (selectedKind === 'attributes') maxInp.value = '20';
+            else if (selectedKind === 'currency') maxInp.value = '99999999';
+            else if (selectedKind === 'meter' && ['5', '6'].includes(maxInp.value.trim())) maxInp.value = '100';
+          } else if (
+            ['clock', 'pips', 'hearts'].includes(selectedKind) &&
+            Number(maxInp.value) === 100
+          ) {
+            maxInp.value = selectedKind === 'clock' ? '6' : '5';
+          }
           if (['text', 'tags', 'tier'].includes(selectedKind) && defInp.value.trim() === '0') {
             defInp.value = '';
           }
@@ -1754,13 +1766,30 @@ export function openStatSchemaModal(
       const footerRow = el('div', 'ls-row-between');
       footerRow.style.marginTop = '12px';
       if (existing) {
-        footerRow.append(
+        const leftActions = el('div', 'ls-row');
+        leftActions.append(
           btn('Duplicate to Another Tab…', () => {
             close();
             openDuplicateStatModal(ctrl, existing);
           }, 'ls-btn-sm'),
-          saveBtn,
+          btn('🗑️ Delete Stat', async () => {
+            const ok = await ctrl.modals.confirm({
+              title: `Delete "${existing.label}"?`,
+              message: `Remove "${existing.icon} ${existing.label}" from the active template and stop tracking it?`,
+              confirmLabel: 'Delete',
+              variant: 'danger',
+            });
+            if (!ok) return;
+            const liveTpl = structuredClone(ctrl.snapshot.template);
+            void ctrl.request('state:mutate', {
+              templatePatch: { stats: liveTpl.stats.filter(s => s.id !== existing.id) },
+              reason: `Deleted stat "${existing.label}"`,
+            });
+            ctrl.notify(`Deleted "${existing.icon} ${existing.label}".`);
+            close();
+          }, 'ls-btn-sm ls-btn-danger'),
         );
+        footerRow.append(leftActions, saveBtn);
       } else {
         footerRow.append(el('span'), saveBtn);
       }
@@ -2492,12 +2521,14 @@ export function renderWorldQuestsAndDispatches(ctrl: LumiFrontendController): HT
   const { state, template } = ctrl.snapshot;
   const core = template.coreTrackers;
   const wrap = el('div', 'ls-stack');
+  const qCfg = resolveBuiltInTrackerConfig(core, 'quests');
+  const dCfg = resolveBuiltInTrackerConfig(core, 'dispatches');
 
   const quests = Object.values(state.quests);
-  if (core?.trackQuests !== false && core?.showQuestsInWidget !== false && quests.length > 0) {
+  if (qCfg.enabled && !qCfg.deleted && core?.showQuestsInWidget !== false && quests.length > 0) {
     const qCard = el('div', 'ls-stat-cell');
     qCard.dataset.span = 'full';
-    qCard.append(el('strong', '', `🎯 Quests & Objectives (${quests.filter(q => q.status === 'active').length})`));
+    qCard.append(el('strong', '', `${qCfg.icon || '🎯'} ${qCfg.label} (${quests.filter(q => q.status === 'active').length})`));
     for (const q of quests) {
       const box = el('div', 'ls-stack');
       box.style.gap = '3px';
@@ -2524,10 +2555,10 @@ export function renderWorldQuestsAndDispatches(ctrl: LumiFrontendController): HT
     wrap.append(qCard);
   }
 
-  if (core?.trackDispatches !== false && core?.showDispatchesInWidget !== false && state.dispatches.length > 0) {
+  if (dCfg.enabled && !dCfg.deleted && core?.showDispatchesInWidget !== false && state.dispatches.length > 0) {
     const dCard = el('div', 'ls-stat-cell');
     dCard.dataset.span = 'full';
-    dCard.append(el('strong', '', `📡 Off-Screen Dispatches (${state.dispatches.length})`));
+    dCard.append(el('strong', '', `${dCfg.icon || '📡'} ${dCfg.label} (${state.dispatches.length})`));
     for (const disp of [...state.dispatches].reverse().slice(0, 3)) {
       const item = el('div', 'ls-bond-dir-box');
       item.append(

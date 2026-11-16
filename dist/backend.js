@@ -197,6 +197,7 @@ function defaultCoreTrackersConfig() {
     trackPlayerAction: false,
     playerActionLabel: "Latest Notable Action",
     playerActionInstruction: "Summarize the player character\u2019s most consequential current action.",
+    showPlayerActionCard: true,
     trackSceneSummary: true,
     sceneSummaryLabel: "Scene Beat Summary",
     sceneSummaryInstruction: "Concise 1-sentence summary of what just happened in the scene.",
@@ -2967,11 +2968,13 @@ function buildCompactFormatExample(state, template, hasPersistedState = false, r
   const otherSchemas = template.stats.filter((s) => s.scope !== "character" && isStatPromptActive(s, state, recentTranscriptText, categoryMap, template.stats));
   const flatMeters = {};
   for (const s of charSchemas) {
-    flatMeters[s.id] = isCompact && hasPersistedState ? isTextLikeStat(s) ? "..." : "+N" : sampleValueForSchema(s, hasPersistedState);
+    const needsCal = hasUncalibratedTarget(state, s);
+    flatMeters[s.id] = isCompact && hasPersistedState && !needsCal ? isTextLikeStat(s) ? "..." : "+N" : sampleValueForSchema(s, hasPersistedState && !needsCal);
   }
   const flatStats = {};
   for (const s of otherSchemas) {
-    flatStats[s.id] = isCompact && hasPersistedState ? isTextLikeStat(s) ? "..." : "+N" : sampleValueForSchema(s, hasPersistedState);
+    const needsCal = hasUncalibratedTarget(state, s);
+    flatStats[s.id] = isCompact && hasPersistedState && !needsCal ? isTextLikeStat(s) ? "..." : "+N" : sampleValueForSchema(s, hasPersistedState && !needsCal);
   }
   const charExample = {
     name: "NPC",
@@ -3009,12 +3012,13 @@ function buildCompactFormatExample(state, template, hasPersistedState = false, r
     ];
   }
   const ov = core?.overrides ?? {};
+  const isCoreActive = (id, enabledFlag) => enabledFlag && !ov[id]?.locked && !ov[id]?.deleted;
   const playerExample = {};
-  if (core?.trackPlayerAttire !== false && !ov.player_attire?.locked)
+  if (isCoreActive("player_attire", core?.trackPlayerAttire !== false))
     playerExample.attire = "...";
-  if (core?.trackPlayerCondition !== false && !ov.player_condition?.locked)
+  if (isCoreActive("player_condition", core?.trackPlayerCondition !== false))
     playerExample.condition = "...";
-  if (core?.trackPlayerAction && !ov.player_action?.locked)
+  if (isCoreActive("player_action", Boolean(core?.trackPlayerAction)))
     playerExample.notableAction = "...";
   const sceneExample = {};
   if (!core?.scenePillLocked) {
@@ -3026,7 +3030,7 @@ function buildCompactFormatExample(state, template, hasPersistedState = false, r
     }
     sceneExample.mins = 5;
   }
-  if (core?.trackSceneSummary !== false && !ov.scene_summary?.locked) {
+  if (isCoreActive("scene_summary", core?.trackSceneSummary !== false)) {
     sceneExample.summary = "...";
   }
   const exampleObj = {
@@ -3037,7 +3041,7 @@ function buildCompactFormatExample(state, template, hasPersistedState = false, r
   };
   const hasPlacesAlready = Object.keys(state.places).length > 0;
   const movementMentioned = !hasPlacesAlready || /\b(?:entered|arrived\s+at|walked\s+(?:into|to)|headed\s+to|stepped\s+(?:into|outside)|moved\s+to|travel(?:ed|ing)\s+to|left\s+for|new\s+location)\b/i.test(recentTranscriptText);
-  if (core?.trackPlaces !== false && !ov.places?.locked && movementMentioned) {
+  if (isCoreActive("places", core?.trackPlaces !== false) && movementMentioned) {
     exampleObj.zones = [
       { name: "Zone", kind: "building|district|region|ship_deck", icon: "\uD83C\uDFDB\uFE0F" }
     ];
@@ -3048,7 +3052,7 @@ function buildCompactFormatExample(state, template, hasPersistedState = false, r
       { from: "A", to: "B", type: "door|hallway|stairs|street|trail|portal", mins: 2 }
     ];
   }
-  if (core?.trackQuests !== false && !ov.quests?.locked && !hasPersistedState) {
+  if (isCoreActive("quests", core?.trackQuests !== false) && !hasPersistedState) {
     exampleObj.quests = [
       { title: "Arc", status: "active", summary: "..." }
     ];
@@ -3104,9 +3108,11 @@ ${formattedRule}`);
     if (!needsFullCalibration && cueText) {
       cueText = cueText.replace(/0[\u2013-]100\s*scale\.\s*/gi, "").replace(/Calibrate[^.;]*?\([^)]*\)[^.;]*[.;]\s*/gi, "").trim();
     }
-    const cueShort = cueText ? clipAtWordBoundary(cueText, needsFullCalibration ? 240 : 110) : "";
+    const cueShort = cueText ? clipAtWordBoundary(cueText, needsFullCalibration ? 260 : 180) : "";
+    const anchorShort = s.anchors.length > 0 && (needsFullCalibration || !cueShort) ? `anchors: ${[...s.anchors].sort((a, b) => a.value - b.value).slice(0, 4).map((a) => `${a.value}=${a.label}`).join(", ")}` : "";
+    const guidance = [cueShort, anchorShort].filter(Boolean).join("; ") || "shift when relevant in scene";
     const labelHint = slugifyKey(s.label, "") !== s.id ? ` "${s.label}"` : "";
-    return `${s.id}${labelHint}[${s.min}..${s.max},${mode}${cueShort ? `: ${cueShort}` : ""}]`;
+    return `${s.id}${labelHint}[${s.min}..${s.max},${mode}: ${guidance}]`;
   };
   const charNumeric = charSchemas.filter((s) => !isTextLikeStat(s) && s.kind !== "boolean");
   const otherNumeric = otherSchemas.filter((s) => !isTextLikeStat(s) && s.kind !== "boolean");
@@ -3130,43 +3136,64 @@ ${formattedRule}`);
   }
   const customDossierFields = enabledFields.filter((f) => !DEFAULT_FIELD_IDS.has(f.id));
   const editedDefaultFields = enabledFields.filter((f) => DEFAULT_FIELD_IDS.has(f.id));
+  const defaultCore = defaultCoreTrackersConfig();
+  const isCoreEnabled = (id, enabledFlag) => enabledFlag && !ov[id]?.locked && !ov[id]?.deleted;
   const trackedTargets = [
-    core?.trackPlayerAttire !== false && !ov.player_attire?.locked ? "player.attire" : "",
-    core?.trackPlayerCondition !== false && !ov.player_condition?.locked ? "player.condition" : "",
-    core?.trackPlayerAction && !ov.player_action?.locked ? "player.notableAction" : "",
+    isCoreEnabled("player_attire", core?.trackPlayerAttire !== false) ? "player.attire" : "",
+    isCoreEnabled("player_condition", core?.trackPlayerCondition !== false) ? "player.condition" : "",
+    isCoreEnabled("player_action", Boolean(core?.trackPlayerAction)) ? "player.notableAction" : "",
     !core?.scenePillLocked ? "scene" : "",
-    core?.trackPlaces !== false && !ov.places?.locked ? "places[]" : "",
-    core?.trackQuests !== false && !ov.quests?.locked ? "quests[]" : "",
-    core?.trackDispatches !== false && !ov.dispatches?.locked ? "dispatches[]" : ""
+    isCoreEnabled("places", core?.trackPlaces !== false) ? "places[]" : "",
+    isCoreEnabled("quests", core?.trackQuests !== false) ? "quests[]" : "",
+    isCoreEnabled("dispatches", core?.trackDispatches !== false) ? "dispatches[]" : ""
   ].filter(Boolean);
   const resolveCoreInst = (id, fallback) => (ov[id]?.instruction ?? fallback ?? "").trim();
+  const isCustomCoreInst = (id, curVal, defVal) => {
+    const resolved = (ov[id]?.instruction ?? curVal ?? "").trim();
+    return Boolean(resolved && resolved !== (defVal ?? "").trim());
+  };
   let coreSection = "";
   if (isCompact && state.initialized) {
     const compactCoreItems = [];
+    const customCoreHints = [];
     if (!core?.scenePillLocked) {
       compactCoreItems.push('scene{location("Spot, Area"),time,date,weather,mins(int)}');
+      for (const [key, cur, def] of [
+        ["scene.location", core?.sceneLocationInstruction, defaultCore.sceneLocationInstruction],
+        ["scene.time", core?.sceneTimeInstruction, defaultCore.sceneTimeInstruction],
+        ["scene.date", core?.sceneDateInstruction, defaultCore.sceneDateInstruction],
+        ["scene.weather", core?.sceneWeatherInstruction, defaultCore.sceneWeatherInstruction],
+        ["scene.mins", core?.sceneTimeFlowInstruction, defaultCore.sceneTimeFlowInstruction]
+      ]) {
+        if (cur && cur.trim() !== (def ?? "").trim()) {
+          customCoreHints.push(`  \u2022 "${key}": ${clipAtWordBoundary(cur, 200)}`);
+        }
+      }
     } else {
       compactCoreItems.push("scene pill LOCKED (omit location/time/date/weather)");
     }
-    if (core?.trackSceneSummary !== false && !ov.scene_summary?.locked)
-      compactCoreItems.push("scene.summary(1-sent)");
-    if (core?.trackPlayerAttire !== false && !ov.player_attire?.locked)
-      compactCoreItems.push("player.attire");
-    if (core?.trackPlayerCondition !== false && !ov.player_condition?.locked)
-      compactCoreItems.push("player.condition");
-    if (core?.trackPlayerAction && !ov.player_action?.locked)
-      compactCoreItems.push("player.notableAction");
-    if (core?.trackPlaces !== false && !ov.places?.locked)
-      compactCoreItems.push("zones[]/places[]/paths[] on new places");
-    if (core?.trackQuests !== false && !ov.quests?.locked)
-      compactCoreItems.push("quests[] on change");
-    if (core?.trackDispatches !== false && !ov.dispatches?.locked)
-      compactCoreItems.push("dispatches[] if offscreen");
-    if (core?.trackNpcConditions !== false && !ov.npc_conditions?.locked)
-      compactCoreItems.push("characters[].conditions");
-    if (core?.trackNpcSecrets !== false && !ov.npc_secrets?.locked)
-      compactCoreItems.push("characters[].secrets");
-    coreSection = `Core Keys (update only if changed): ${compactCoreItems.join(" | ")}`;
+    const pushCoreCompact = (id, enabledFlag, shortTag, curInst, defInst) => {
+      if (!isCoreEnabled(id, enabledFlag))
+        return;
+      compactCoreItems.push(shortTag);
+      if (isCustomCoreInst(id, curInst, defInst)) {
+        customCoreHints.push(`  \u2022 "${shortTag}": ${clipAtWordBoundary(resolveCoreInst(id, curInst), 200)}`);
+      }
+    };
+    pushCoreCompact("scene_summary", core?.trackSceneSummary !== false, "scene.summary(1-sent)", core?.sceneSummaryInstruction, defaultCore.sceneSummaryInstruction);
+    pushCoreCompact("player_attire", core?.trackPlayerAttire !== false, "player.attire", core?.playerAttireInstruction, defaultCore.playerAttireInstruction);
+    pushCoreCompact("player_condition", core?.trackPlayerCondition !== false, "player.condition", core?.playerConditionInstruction, defaultCore.playerConditionInstruction);
+    pushCoreCompact("player_action", Boolean(core?.trackPlayerAction), "player.notableAction", core?.playerActionInstruction, defaultCore.playerActionInstruction);
+    pushCoreCompact("places", core?.trackPlaces !== false, "zones[]/places[]/paths[] on new places", core?.placesInstruction, defaultCore.placesInstruction);
+    pushCoreCompact("quests", core?.trackQuests !== false, "quests[] on change", core?.questsInstruction, defaultCore.questsInstruction);
+    pushCoreCompact("dispatches", core?.trackDispatches !== false, "dispatches[] if offscreen", core?.dispatchesInstruction, defaultCore.dispatchesInstruction);
+    pushCoreCompact("npc_conditions", core?.trackNpcConditions !== false, "characters[].conditions", core?.npcConditionsInstruction, defaultCore.npcConditionsInstruction);
+    pushCoreCompact("npc_secrets", core?.trackNpcSecrets !== false, "characters[].secrets", core?.npcSecretsInstruction, defaultCore.npcSecretsInstruction);
+    coreSection = [
+      `Core Keys (update only if changed): ${compactCoreItems.join(" | ")}`,
+      ...customCoreHints
+    ].join(`
+`);
   } else {
     const scenePillHints = !core?.scenePillLocked ? [
       core?.sceneLocationInstruction ? `  \u2022 "scene.location": ${clipAtWordBoundary(core.sceneLocationInstruction, 200)}` : "",
@@ -3177,34 +3204,45 @@ ${formattedRule}`);
     ].filter(Boolean) : ["  \u2022 Scene Pill is LOCKED \u2014 omit location/time/date/weather."];
     const corePromptHints = [
       ...scenePillHints,
-      core?.trackPlayerAttire !== false && !ov.player_attire?.locked && resolveCoreInst("player_attire", core?.playerAttireInstruction) ? `  \u2022 "player.attire": ${clipAtWordBoundary(resolveCoreInst("player_attire", core?.playerAttireInstruction), 200)}` : "",
-      core?.trackPlayerCondition !== false && !ov.player_condition?.locked && resolveCoreInst("player_condition", core?.playerConditionInstruction) ? `  \u2022 "player.condition": ${clipAtWordBoundary(resolveCoreInst("player_condition", core?.playerConditionInstruction), 200)}` : "",
-      core?.trackPlayerAction && !ov.player_action?.locked && resolveCoreInst("player_action", core?.playerActionInstruction) ? `  \u2022 "player.notableAction": ${clipAtWordBoundary(resolveCoreInst("player_action", core?.playerActionInstruction), 200)}` : "",
-      core?.trackSceneSummary !== false && !ov.scene_summary?.locked && resolveCoreInst("scene_summary", core?.sceneSummaryInstruction) ? `  \u2022 "scene.summary": ${clipAtWordBoundary(resolveCoreInst("scene_summary", core?.sceneSummaryInstruction), 200)}` : "",
-      core?.trackPlaces !== false && !ov.places?.locked && resolveCoreInst("places", core?.placesInstruction) ? `  \u2022 "places[]/zones[]": ${clipAtWordBoundary(resolveCoreInst("places", core?.placesInstruction), 200)}` : "",
-      core?.trackQuests !== false && !ov.quests?.locked && resolveCoreInst("quests", core?.questsInstruction) ? `  \u2022 "quests[]": ${clipAtWordBoundary(resolveCoreInst("quests", core?.questsInstruction), 200)}` : "",
-      core?.trackDispatches !== false && !ov.dispatches?.locked && resolveCoreInst("dispatches", core?.dispatchesInstruction) ? `  \u2022 "dispatches[]": ${clipAtWordBoundary(resolveCoreInst("dispatches", core?.dispatchesInstruction), 200)}` : "",
-      core?.trackNpcConditions === false || ov.npc_conditions?.locked ? "  \u2022 Skip character conditions[]." : resolveCoreInst("npc_conditions", core?.npcConditionsInstruction) ? `  \u2022 "characters[].conditions": ${clipAtWordBoundary(resolveCoreInst("npc_conditions", core?.npcConditionsInstruction), 180)}` : "",
-      core?.trackNpcSecrets === false || ov.npc_secrets?.locked ? "  \u2022 Skip character secrets[]." : resolveCoreInst("npc_secrets", core?.npcSecretsInstruction) ? `  \u2022 "characters[].secrets": ${clipAtWordBoundary(resolveCoreInst("npc_secrets", core?.npcSecretsInstruction), 180)}` : ""
+      isCoreEnabled("player_attire", core?.trackPlayerAttire !== false) && resolveCoreInst("player_attire", core?.playerAttireInstruction) ? `  \u2022 "player.attire": ${clipAtWordBoundary(resolveCoreInst("player_attire", core?.playerAttireInstruction), 200)}` : "",
+      isCoreEnabled("player_condition", core?.trackPlayerCondition !== false) && resolveCoreInst("player_condition", core?.playerConditionInstruction) ? `  \u2022 "player.condition": ${clipAtWordBoundary(resolveCoreInst("player_condition", core?.playerConditionInstruction), 200)}` : "",
+      isCoreEnabled("player_action", Boolean(core?.trackPlayerAction)) && resolveCoreInst("player_action", core?.playerActionInstruction) ? `  \u2022 "player.notableAction": ${clipAtWordBoundary(resolveCoreInst("player_action", core?.playerActionInstruction), 200)}` : "",
+      isCoreEnabled("scene_summary", core?.trackSceneSummary !== false) && resolveCoreInst("scene_summary", core?.sceneSummaryInstruction) ? `  \u2022 "scene.summary": ${clipAtWordBoundary(resolveCoreInst("scene_summary", core?.sceneSummaryInstruction), 200)}` : "",
+      isCoreEnabled("places", core?.trackPlaces !== false) && resolveCoreInst("places", core?.placesInstruction) ? `  \u2022 "places[]/zones[]": ${clipAtWordBoundary(resolveCoreInst("places", core?.placesInstruction), 200)}` : "",
+      isCoreEnabled("quests", core?.trackQuests !== false) && resolveCoreInst("quests", core?.questsInstruction) ? `  \u2022 "quests[]": ${clipAtWordBoundary(resolveCoreInst("quests", core?.questsInstruction), 200)}` : "",
+      isCoreEnabled("dispatches", core?.trackDispatches !== false) && resolveCoreInst("dispatches", core?.dispatchesInstruction) ? `  \u2022 "dispatches[]": ${clipAtWordBoundary(resolveCoreInst("dispatches", core?.dispatchesInstruction), 200)}` : "",
+      !isCoreEnabled("npc_conditions", core?.trackNpcConditions !== false) ? "  \u2022 Skip character conditions[]." : resolveCoreInst("npc_conditions", core?.npcConditionsInstruction) ? `  \u2022 "characters[].conditions": ${clipAtWordBoundary(resolveCoreInst("npc_conditions", core?.npcConditionsInstruction), 180)}` : "",
+      !isCoreEnabled("npc_secrets", core?.trackNpcSecrets !== false) ? "  \u2022 Skip character secrets[]." : resolveCoreInst("npc_secrets", core?.npcSecretsInstruction) ? `  \u2022 "characters[].secrets": ${clipAtWordBoundary(resolveCoreInst("npc_secrets", core?.npcSecretsInstruction), 180)}` : ""
     ].filter(Boolean);
     coreSection = corePromptHints.length ? `Core & Scene Pill Rules:
 ${corePromptHints.join(`
 `)}` : "";
   }
+  const defaultFieldInstMap = new Map(defaultDossierFields().map((df) => [df.id, df.instruction.trim()]));
   let dossierSection = "";
   if (isCompact && state.initialized) {
-    const defKeys = editedDefaultFields.map((f) => f.id);
-    const customHints = customDossierFields.map((f) => `"${f.id}" (${clipAtWordBoundary(f.instruction, 140)})`);
+    const unchangedDefKeys = [];
+    const customOrEditedHints = [];
+    for (const f of editedDefaultFields) {
+      if (f.instruction.trim() !== (defaultFieldInstMap.get(f.id) ?? "")) {
+        customOrEditedHints.push(`"${f.id}" (${clipAtWordBoundary(f.instruction, 160)})`);
+      } else {
+        unchangedDefKeys.push(f.id);
+      }
+    }
+    for (const f of customDossierFields) {
+      customOrEditedHints.push(`"${f.id}" (${clipAtWordBoundary(f.instruction, 160)})`);
+    }
     const parts = [
-      defKeys.length ? `keys: ${defKeys.join(", ")}` : "",
-      ...customHints
+      unchangedDefKeys.length ? `keys: ${unchangedDefKeys.join(", ")}` : "",
+      ...customOrEditedHints
     ].filter(Boolean);
     if (parts.length) {
       dossierSection = `Dossier Fields (omit unchanged): ${parts.join(" | ")}`;
     }
   } else {
     const dossierHints = [
-      ...editedDefaultFields.map((f) => `"${f.id}" (${clipAtWordBoundary(f.instruction, 130)})`),
+      ...editedDefaultFields.map((f) => `"${f.id}" (${clipAtWordBoundary(f.instruction, 160)})`),
       ...customDossierFields.map((f) => `"${f.id}" (${clipAtWordBoundary(f.instruction, 160)})`)
     ];
     if (dossierHints.length) {
@@ -3670,7 +3708,38 @@ function inferInitialPeerBondMeters(label, attitude) {
   }
   return { affinity: 50, trust: 50 };
 }
-function normalizeStatMutation(rawInput, alreadyCalibrated) {
+function parseNumericStringMutation(trimmed, explicitOp, reason) {
+  if (!trimmed || trimmed === "\u2205")
+    return null;
+  const signedExact = trimmed.match(/^([+-])\s*(\d+(?:\.\d+)?)\s*%?$/);
+  if (signedExact) {
+    const num = Number(`${signedExact[1]}${signedExact[2]}`);
+    return Number.isFinite(num) ? { op: "delta", value: num, reason } : null;
+  }
+  const signedWithNote = trimmed.match(/^([+-])\s*(\d+(?:\.\d+)?)\s*%?(?:\s*[\(\[\u2014\u2013\-:]\s*([^)\]]+)\)?)$/);
+  if (signedWithNote) {
+    const num = Number(`${signedWithNote[1]}${signedWithNote[2]}`);
+    const inlineReason = cleanStringValue(signedWithNote[3] ?? "");
+    return Number.isFinite(num) ? { op: "delta", value: num, reason: reason || inlineReason || undefined } : null;
+  }
+  const fractionMatch = trimmed.match(/^(-?\d+(?:\.\d+)?)\s*\/\s*\d+(?:\.\d+)?$/);
+  if (fractionMatch) {
+    const num = Number(fractionMatch[1]);
+    return Number.isFinite(num) ? { op: "set", value: num, reason } : null;
+  }
+  const plainNum = Number(trimmed);
+  if (Number.isFinite(plainNum)) {
+    return { op: explicitOp, value: plainNum, reason };
+  }
+  const numWithNote = trimmed.match(/^(-?\d+(?:\.\d+)?)\s*%?(?:\s*[\(\[\u2014\u2013\-]\s*([^)\]]+)\)?)$/);
+  if (numWithNote) {
+    const num = Number(numWithNote[1]);
+    const inlineReason = cleanStringValue(numWithNote[2] ?? "");
+    return Number.isFinite(num) ? { op: explicitOp, value: num, reason: reason || inlineReason || undefined } : null;
+  }
+  return null;
+}
+function normalizeStatMutation(rawInput, _alreadyCalibrated, isNumericTarget = false) {
   if (rawInput === null || rawInput === undefined)
     return null;
   if (Array.isArray(rawInput)) {
@@ -3686,26 +3755,18 @@ function normalizeStatMutation(rawInput, alreadyCalibrated) {
       return { op: "set", value: JSON.stringify(rawInput) };
     }
     const rawVal = obj.value;
-    const explicitOp = obj.op === "delta" && alreadyCalibrated ? "delta" : "set";
+    const explicitOp = obj.op === "delta" ? "delta" : "set";
     const rawReasonStr = typeof obj.reason === "string" ? cleanStringValue(obj.reason) : "";
     const cleanedReason = rawReasonStr && !/^(?:manual ui adjustment|manual dossier adjustment|scene progression)$/i.test(rawReasonStr) ? rawReasonStr : undefined;
     if (typeof rawVal === "string") {
       const trimmed = cleanStringValue(rawVal);
       if (!trimmed || trimmed === "\u2205")
         return null;
-      const signedMatch = trimmed.match(/^([+-])(\d+(?:\.\d+)?)$/);
-      if (signedMatch) {
-        const num = Number(trimmed);
-        return {
-          op: alreadyCalibrated ? "delta" : "set",
-          value: alreadyCalibrated ? num : Math.abs(num),
-          reason: cleanedReason
-        };
-      }
-      const plainNum = Number(trimmed);
-      if (Number.isFinite(plainNum)) {
-        return { op: explicitOp, value: plainNum, reason: cleanedReason };
-      }
+      const numericParsed = parseNumericStringMutation(trimmed, explicitOp, cleanedReason);
+      if (numericParsed)
+        return numericParsed;
+      if (isNumericTarget)
+        return null;
       return { op: "set", value: trimmed, reason: cleanedReason };
     }
     return { op: explicitOp, value: rawVal, reason: cleanedReason };
@@ -3714,18 +3775,11 @@ function normalizeStatMutation(rawInput, alreadyCalibrated) {
     const trimmed = cleanStringValue(rawInput);
     if (!trimmed || trimmed === "\u2205")
       return null;
-    const signedMatch = trimmed.match(/^([+-])(\d+(?:\.\d+)?)$/);
-    if (signedMatch) {
-      const num = Number(trimmed);
-      return {
-        op: alreadyCalibrated ? "delta" : "set",
-        value: alreadyCalibrated ? num : Math.abs(num)
-      };
-    }
-    const plainNum = Number(trimmed);
-    if (Number.isFinite(plainNum)) {
-      return { op: "set", value: plainNum };
-    }
+    const numericParsed = parseNumericStringMutation(trimmed, "set");
+    if (numericParsed)
+      return numericParsed;
+    if (isNumericTarget)
+      return null;
     return { op: "set", value: trimmed };
   }
   if (typeof rawInput === "number") {
@@ -3766,7 +3820,13 @@ function applyTurnPatch(before, template, patch, options = {}) {
   if (effectiveElapsed > 0) {
     next.elapsedMinutes += effectiveElapsed;
   }
-  const pillLocked = !bypassLocks && Boolean(template.coreTrackers?.scenePillLocked);
+  const coreCfg = template.coreTrackers;
+  const coreOv = coreCfg?.overrides ?? {};
+  const isBuiltinWritable = (id, enabledFlag) => {
+    const ov = coreOv[id];
+    return bypassLocks || enabledFlag && !ov?.locked && !ov?.deleted;
+  };
+  const pillLocked = !bypassLocks && Boolean(coreCfg?.scenePillLocked);
   if (sceneSource) {
     const loc = String(sceneSource.location ?? "").trim();
     const time = String(sceneSource.timeLabel ?? sceneSource.time ?? sceneSource.current_time ?? "").trim();
@@ -3783,7 +3843,7 @@ function applyTurnPatch(before, template, patch, options = {}) {
       if (weather)
         next.scene.weather = cleanStringValue(weather);
     }
-    if (summary && (bypassLocks || !template.coreTrackers?.overrides?.scene_summary?.locked)) {
+    if (summary && isBuiltinWritable("scene_summary", coreCfg?.trackSceneSummary !== false)) {
       next.scene.beatSummary = cleanStringValue(summary);
     }
     if (loc || summary || time || date) {
@@ -3796,12 +3856,15 @@ function applyTurnPatch(before, template, patch, options = {}) {
   const extraStatBags = [];
   if (patch.player && typeof patch.player === "object") {
     const pObj = patch.player;
-    if (typeof pObj.attire === "string" && pObj.attire.trim())
+    if (typeof pObj.attire === "string" && pObj.attire.trim() && isBuiltinWritable("player_attire", coreCfg?.trackPlayerAttire !== false)) {
       next.player.attire = cleanStringValue(pObj.attire);
-    if (typeof pObj.condition === "string" && pObj.condition.trim())
+    }
+    if (typeof pObj.condition === "string" && pObj.condition.trim() && isBuiltinWritable("player_condition", coreCfg?.trackPlayerCondition !== false)) {
       next.player.condition = cleanStringValue(pObj.condition);
-    if (typeof pObj.notableAction === "string" && pObj.notableAction.trim())
+    }
+    if (typeof pObj.notableAction === "string" && pObj.notableAction.trim() && isBuiltinWritable("player_action", Boolean(coreCfg?.trackPlayerAction))) {
       next.player.notableAction = cleanStringValue(pObj.notableAction);
+    }
     const playerStatCandidates = {};
     for (const [pk, pv] of Object.entries(pObj)) {
       if (!["attire", "condition", "notableAction", "name"].includes(pk) && pv !== undefined) {
@@ -3846,22 +3909,24 @@ function applyTurnPatch(before, template, patch, options = {}) {
     const existing = next.stats[schema.id];
     if (!bypassLocks && (schema.locked || existing?.locked))
       return;
+    const isTextStyle = Boolean(schema.displayStyle && schema.displayStyle !== "auto") || ["text", "tags", "tier", "skill_tree", "xp_level", "attributes", "inventory", "status_fx"].includes(schema.kind);
+    const isNumericStat = !isTextStyle && ["meter", "number", "clock", "pips", "hearts", "currency"].includes(schema.kind);
     const wasCalibrated = Boolean(existing?.calibrated);
-    const mutation = normalizeStatMutation(rawMutation, wasCalibrated);
+    const mutation = normalizeStatMutation(rawMutation, wasCalibrated, isNumericStat);
     if (!mutation)
       return;
     const prevValue = existing?.calibrated ? existing.value : null;
     let finalValue;
     let numericDelta = 0;
-    const isTextStyle = Boolean(schema.displayStyle && schema.displayStyle !== "auto") || ["text", "tags", "tier", "skill_tree", "xp_level", "attributes", "inventory", "status_fx"].includes(schema.kind);
-    if (!isTextStyle && ["meter", "number", "clock", "pips", "hearts", "currency"].includes(schema.kind) && Number.isFinite(Number(mutation.value))) {
+    if (isNumericStat && Number.isFinite(Number(mutation.value))) {
       const rawNum = Number(mutation.value);
       if (!Number.isFinite(rawNum))
         return;
-      const baseNum = wasCalibrated && typeof existing?.value === "number" ? existing.value : typeof schema.defaultValue === "number" ? schema.defaultValue : schema.min;
+      const existingParsed = typeof existing?.value === "number" ? existing.value : typeof existing?.value === "string" ? parseNumericStringMutation(existing.value, "set")?.value : undefined;
+      const baseNum = wasCalibrated && typeof existingParsed === "number" ? existingParsed : typeof schema.defaultValue === "number" ? schema.defaultValue : schema.min;
       const isIntKind = ["clock", "pips", "hearts", "currency"].includes(schema.kind);
-      if (mutation.op === "delta" && wasCalibrated) {
-        if (rawNum === 0)
+      if (mutation.op === "delta") {
+        if (wasCalibrated && rawNum === 0)
           return;
         const computed = baseNum + rawNum;
         finalValue = Math.max(schema.min, Math.min(schema.max, isIntKind ? Math.round(computed) : Number(computed.toFixed(2))));
@@ -3909,29 +3974,28 @@ function applyTurnPatch(before, template, patch, options = {}) {
     const existing = char.meters[schema.id];
     if (!bypassLocks && (schema.locked || existing?.locked))
       return;
+    const isCharTextStyle = Boolean(schema.displayStyle && schema.displayStyle !== "auto") || ["text", "tags", "tier", "skill_tree", "xp_level", "attributes", "inventory", "status_fx"].includes(schema.kind);
+    const isCharNumeric = !isCharTextStyle && ["meter", "number", "clock", "pips", "hearts", "currency"].includes(schema.kind);
     const wasCalibrated = Boolean(existing?.calibrated);
-    const mutation = normalizeStatMutation(rawMutation, wasCalibrated);
+    const mutation = normalizeStatMutation(rawMutation, wasCalibrated, isCharNumeric);
     if (!mutation)
       return;
     const prevValue = wasCalibrated && existing ? existing.value : null;
     let finalValue;
     let numericDelta = 0;
-    const isCharTextStyle = Boolean(schema.displayStyle && schema.displayStyle !== "auto") || ["text", "tags", "tier", "skill_tree", "xp_level", "attributes", "inventory", "status_fx"].includes(schema.kind);
-    if (!isCharTextStyle && ["meter", "number", "clock", "pips", "hearts", "currency"].includes(schema.kind) && Number.isFinite(Number(mutation.value))) {
+    if (isCharNumeric && Number.isFinite(Number(mutation.value))) {
       const rawNum = Number(mutation.value);
-      const baseNum = wasCalibrated && typeof existing?.value === "number" ? existing.value : typeof schema.defaultValue === "number" ? schema.defaultValue : 0;
-      if (!bypassLocks && wasCalibrated && mutation.op === "set" && rawNum === 0 && baseNum !== 0 && schema.volatility !== "momentary") {
-        return;
-      }
-      if (mutation.op === "delta" && wasCalibrated) {
-        if (rawNum === 0)
+      const existingParsed = typeof existing?.value === "number" ? existing.value : typeof existing?.value === "string" ? parseNumericStringMutation(existing.value, "set")?.value : undefined;
+      const baseNum = wasCalibrated && typeof existingParsed === "number" ? existingParsed : typeof schema.defaultValue === "number" ? schema.defaultValue : schema.min;
+      if (mutation.op === "delta") {
+        if (wasCalibrated && rawNum === 0)
           return;
         const computed = baseNum + rawNum;
         finalValue = Math.max(schema.min, Math.min(schema.max, Math.round(computed)));
       } else {
         finalValue = Math.max(schema.min, Math.min(schema.max, Math.round(rawNum)));
       }
-      numericDelta = typeof prevValue === "number" ? finalValue - prevValue : finalValue - (typeof schema.defaultValue === "number" ? schema.defaultValue : 0);
+      numericDelta = typeof prevValue === "number" ? finalValue - prevValue : finalValue - (typeof schema.defaultValue === "number" ? schema.defaultValue : schema.min);
       checkThresholdAlerts(schema, typeof prevValue === "number" ? prevValue : undefined, finalValue, char.name);
     } else if (schema.kind === "boolean") {
       finalValue = mutation.value === true || mutation.value === 1 || String(mutation.value).toLowerCase() === "true";
@@ -4080,7 +4144,12 @@ function applyTurnPatch(before, template, patch, options = {}) {
       const thoughtVal = String(rawChar.innerThought ?? rawCharRec.thought ?? rawCharRec.internal_thought ?? "").trim();
       const goalVal = String(rawChar.immediateGoal ?? rawCharRec.goal ?? rawCharRec.aim ?? "").trim();
       const attireVal = String(rawChar.attire ?? rawCharRec.clothing ?? "").trim();
-      const isDossierFieldAllowed = (fid) => bypassLocks || template.dossierFields.find((f) => f.id === fid)?.locked !== true;
+      const isDossierFieldAllowed = (fid) => {
+        if (bypassLocks)
+          return true;
+        const found = template.dossierFields.find((f) => f.id === fid);
+        return Boolean(found && found.enabled && !found.locked);
+      };
       if (roleVal && isDossierFieldAllowed("role_summary")) {
         char.roleSummary = cleanStringValue(roleVal);
         char.fields.role_summary = char.roleSummary;
@@ -4104,7 +4173,7 @@ function applyTurnPatch(before, template, patch, options = {}) {
       if (Array.isArray(rawChar.aliases)) {
         char.aliases = [...new Set([...char.aliases, ...rawChar.aliases.map((a) => cleanStringValue(String(a)))])].slice(0, 12);
       }
-      if (Array.isArray(rawChar.conditions)) {
+      if (Array.isArray(rawChar.conditions) && isBuiltinWritable("npc_conditions", coreCfg?.trackNpcConditions !== false)) {
         char.conditions = rawChar.conditions.map((c) => cleanStringValue(String(c))).filter(Boolean).slice(0, 10);
       }
       if (typeof rawCharRec.notes === "string") {
@@ -4187,11 +4256,19 @@ function applyTurnPatch(before, template, patch, options = {}) {
       for (const [ck, cv] of Object.entries(rawCharRec)) {
         if (RESERVED_CHAR_KEYS.has(ck) || cv === null || cv === undefined)
           continue;
-        if (typeof cv === "number" || typeof cv === "boolean" || typeof cv === "string") {
+        const isPatchObj = typeof cv === "object" && !Array.isArray(cv) && "value" in cv;
+        if (typeof cv === "number" || typeof cv === "boolean" || typeof cv === "string" || isPatchObj) {
+          const matchedStat = matchStatSchema(template.stats, ck, "character");
+          if (matchedStat) {
+            combinedMeters[ck] = cv;
+            continue;
+          }
           const matchedField = template.dossierFields.find((f) => f.id === ck || slugifyKey(f.label, "") === slugifyKey(ck, ""));
           if (matchedField && typeof cv === "string") {
-            char.fields[matchedField.id] = cleanStringValue(cv).slice(0, 1000);
-          } else {
+            if (bypassLocks || matchedField.enabled && !matchedField.locked) {
+              char.fields[matchedField.id] = cleanStringValue(cv).slice(0, 1000);
+            }
+          } else if (!matchedField) {
             combinedMeters[ck] = cv;
           }
         }
@@ -4308,7 +4385,7 @@ function applyTurnPatch(before, template, patch, options = {}) {
           };
         }
       }
-      if (Array.isArray(rawChar.secrets)) {
+      if (Array.isArray(rawChar.secrets) && isBuiltinWritable("npc_secrets", coreCfg?.trackNpcSecrets !== false)) {
         for (const sec of rawChar.secrets) {
           if (!sec?.title?.trim())
             continue;
@@ -4432,7 +4509,8 @@ function applyTurnPatch(before, template, patch, options = {}) {
       next.places[raw.toId].connectedIds.push(raw.fromId);
     }
   };
-  if (Array.isArray(patch.zones)) {
+  const placesWritable = isBuiltinWritable("places", coreCfg?.trackPlaces !== false);
+  if (placesWritable && Array.isArray(patch.zones)) {
     for (const rz of patch.zones) {
       if (!rz?.name?.trim())
         continue;
@@ -4445,7 +4523,7 @@ function applyTurnPatch(before, template, patch, options = {}) {
       });
     }
   }
-  if (next.scene.location) {
+  if (placesWritable && next.scene.location) {
     const locParts = next.scene.location.split(/\s*(?:,|\u2014|\u2013|\|)\s*/).map((s) => s.trim()).filter(Boolean);
     const primaryName = normalizeDisplayLabel(locParts[0] || next.scene.location, false);
     const secondaryZoneName = locParts[1] || "";
@@ -4485,7 +4563,7 @@ function applyTurnPatch(before, template, patch, options = {}) {
       }
     }
   }
-  if (Array.isArray(patch.places)) {
+  if (placesWritable && Array.isArray(patch.places)) {
     for (const rp of patch.places) {
       if (!rp?.name?.trim())
         continue;
@@ -4532,7 +4610,7 @@ function applyTurnPatch(before, template, patch, options = {}) {
       }
     }
   }
-  if (Array.isArray(patch.paths)) {
+  if (placesWritable && Array.isArray(patch.paths)) {
     const resolvePlaceByRef = (ref) => {
       const clean = cleanStringValue(ref);
       const byExact = next.places[clean];
@@ -4569,7 +4647,7 @@ function applyTurnPatch(before, template, patch, options = {}) {
       }
     }
   }
-  if (Array.isArray(patch.quests)) {
+  if (Array.isArray(patch.quests) && isBuiltinWritable("quests", coreCfg?.trackQuests !== false)) {
     for (const rq of patch.quests) {
       if (!rq?.title?.trim())
         continue;
@@ -4589,7 +4667,7 @@ function applyTurnPatch(before, template, patch, options = {}) {
       };
     }
   }
-  if (Array.isArray(patch.dispatches)) {
+  if (Array.isArray(patch.dispatches) && isBuiltinWritable("dispatches", coreCfg?.trackDispatches !== false)) {
     for (const rd of patch.dispatches) {
       if (!rd?.summary?.trim())
         continue;
@@ -6251,8 +6329,15 @@ class LumiStatsService {
               calibrated: false,
               locked: def.locked
             };
-          } else if (isTextDef && typeof curM.value === "number") {
-            curM.value = typeof def.defaultValue === "string" ? def.defaultValue : String(curM.value);
+          } else {
+            curM.locked = def.locked;
+            if (!curM.calibrated) {
+              curM.value = def.defaultValue;
+            } else if (isTextDef && typeof curM.value === "number") {
+              curM.value = typeof def.defaultValue === "string" ? def.defaultValue : String(curM.value);
+            } else if (!isTextDef && typeof curM.value === "number") {
+              curM.value = Math.max(def.min, Math.min(def.max, curM.value));
+            }
           }
         }
         continue;
@@ -6269,7 +6354,9 @@ class LumiStatsService {
       } else {
         existing.scope = def.scope;
         existing.locked = def.locked;
-        if (isTextDef && typeof existing.value === "number") {
+        if (!existing.calibrated) {
+          existing.value = def.defaultValue;
+        } else if (isTextDef && typeof existing.value === "number") {
           existing.value = typeof def.defaultValue === "string" ? def.defaultValue : String(existing.value);
         } else if (!isTextDef && typeof existing.value === "number") {
           existing.value = Math.max(def.min, Math.min(def.max, existing.value));

@@ -324,6 +324,7 @@ export function defaultCoreTrackersConfig(): CoreTrackersConfig {
     trackPlayerAction: false,
     playerActionLabel: 'Latest Notable Action',
     playerActionInstruction: 'Summarize the player character’s most consequential current action.',
+    showPlayerActionCard: true,
     trackSceneSummary: true,
     sceneSummaryLabel: 'Scene Beat Summary',
     sceneSummaryInstruction: 'Concise 1-sentence summary of what just happened in the scene.',

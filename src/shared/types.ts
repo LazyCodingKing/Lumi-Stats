@@ -180,6 +180,7 @@ export interface BuiltInTrackerConfig {
   inlineTabId?: string;
   pinnedToHeader?: boolean;
   locked?: boolean;
+  deleted?: boolean;
 }
 
 export interface CoreTrackersConfig {
@@ -194,6 +195,7 @@ export interface CoreTrackersConfig {
   trackPlayerAction?: boolean;
   playerActionLabel?: string;
   playerActionInstruction?: string;
+  showPlayerActionCard?: boolean;
   trackSceneSummary: boolean;
   sceneSummaryLabel?: string;
   sceneSummaryInstruction?: string;

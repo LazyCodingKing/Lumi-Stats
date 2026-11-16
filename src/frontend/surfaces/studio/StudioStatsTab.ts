@@ -374,6 +374,15 @@ export function renderStudioStatsTab(
       right.style.flex = 'none';
       right.append(
         btn('Full Edit', () => openStatSchemaModal(ctrl, schema.scope, schema), 'ls-btn-sm'),
+        iconBtn('trash', () => {
+          saveTemplatePatch(live => ({
+            stats: live.stats.filter(s => s.id !== schema.id),
+          }), `Deleted stat "${schema.label}"`);
+          ctrl.notify(`Deleted "${schema.icon} ${schema.label}".`);
+        }, {
+          className: 'ls-btn-sm ls-btn-icon ls-btn-ghost ls-btn-danger',
+          title: `Delete "${schema.label}"`,
+        }),
         iconBtn(
           'more',
           async e => {
@@ -535,7 +544,11 @@ export function renderStudioStatsTab(
       listHost.append(statCard);
     }
 
-    // 6. Built-In Core Trackers (Now ALL have Full Edit just like custom stats!)
+    // 6. Built-In Core Trackers (Editable & Deletable!)
+    const deletedBuiltinsCount = BUILTIN_IDS.filter(item =>
+      Boolean(tpl.coreTrackers?.overrides?.[item.id]?.deleted),
+    ).length;
+
     const filteredBuiltins = BUILTIN_IDS.filter(item => {
       if (activeStatsFilter === 'dossier') return false;
       if (
@@ -546,18 +559,61 @@ export function renderStudioStatsTab(
         return false;
       }
       const cfg = resolveBuiltInTrackerConfig(tpl.coreTrackers, item.id);
+      if (cfg.deleted) return false;
       return matchesQuery(`${item.id} ${cfg.label} ${cfg.instruction}`);
     });
 
-    if (filteredBuiltins.length > 0) {
+    if (filteredBuiltins.length > 0 || (deletedBuiltinsCount > 0 && (activeStatsFilter === 'all' || activeStatsFilter === 'builtin'))) {
       const builtCard = el('section', 'ls-card');
-      builtCard.append(
-        el('div', 'ls-row-between'),
-      );
-      (builtCard.firstElementChild as HTMLElement).append(
+      const builtHead = el('div', 'ls-row-between');
+      const builtRightHead = el('div', 'ls-row');
+      if (deletedBuiltinsCount > 0) {
+        builtRightHead.append(
+          btn(`↺ Restore Deleted (${deletedBuiltinsCount})`, () => {
+            saveTemplatePatch(live => {
+              const nextOverrides = { ...(live.coreTrackers?.overrides ?? {}) };
+              for (const k of Object.keys(nextOverrides) as BuiltInTrackerId[]) {
+                if (nextOverrides[k]?.deleted) {
+                  nextOverrides[k] = { ...nextOverrides[k], deleted: false };
+                }
+              }
+              return {
+                coreTrackers: {
+                  ...(live.coreTrackers ?? {}),
+                  overrides: nextOverrides,
+                } as LumiStatsTemplate['coreTrackers'],
+              };
+            }, 'Restored deleted built-in trackers');
+          }, 'ls-btn-sm ls-btn-ghost'),
+        );
+      } else {
+        builtRightHead.append(el('span', 'ls-muted', 'Editable labels, prompts, styles & tabs'));
+      }
+      builtHead.append(
         el('h3', '', `Built-In Story Trackers (${filteredBuiltins.length})`),
-        el('span', 'ls-muted', 'Editable labels, prompts, styles & tabs'),
+        builtRightHead,
       );
+      builtCard.append(builtHead);
+
+      const toggleMap: Record<BuiltInTrackerId, string> = {
+        player_attire: 'trackPlayerAttire',
+        player_condition: 'trackPlayerCondition',
+        player_action: 'trackPlayerAction',
+        scene_summary: 'trackSceneSummary',
+        places: 'trackPlaces',
+        quests: 'trackQuests',
+        dispatches: 'trackDispatches',
+        npc_conditions: 'trackNpcConditions',
+        npc_secrets: 'trackNpcSecrets',
+      };
+      const showCardMap: Partial<Record<BuiltInTrackerId, string>> = {
+        player_attire: 'showPlayerAttireCard',
+        player_condition: 'showPlayerConditionCard',
+        player_action: 'showPlayerActionCard',
+        scene_summary: 'showSceneSummaryInWidget',
+        quests: 'showQuestsInWidget',
+        dispatches: 'showDispatchesInWidget',
+      };
 
       for (const item of filteredBuiltins) {
         const cfg = resolveBuiltInTrackerConfig(tpl.coreTrackers, item.id);
@@ -570,17 +626,6 @@ export function renderStudioStatsTab(
           checked: cfg.enabled,
           ariaLabel: `Toggle ${cfg.label}`,
           onChange: on => {
-            const toggleMap: Record<BuiltInTrackerId, string> = {
-              player_attire: 'trackPlayerAttire',
-              player_condition: 'trackPlayerCondition',
-              player_action: 'trackPlayerAction',
-              scene_summary: 'trackSceneSummary',
-              places: 'trackPlaces',
-              quests: 'trackQuests',
-              dispatches: 'trackDispatches',
-              npc_conditions: 'trackNpcConditions',
-              npc_secrets: 'trackNpcSecrets',
-            };
             saveTemplatePatch(live => {
               const core = { ...(live.coreTrackers ?? {}) } as Record<string, unknown>;
               core[toggleMap[item.id]] = on;
@@ -598,6 +643,27 @@ export function renderStudioStatsTab(
         const right = el('div', 'ls-row');
         right.append(
           btn('Full Edit', () => openBuiltinTrackerModal(ctrl, item.id), 'ls-btn-sm'),
+          iconBtn('trash', () => {
+            saveTemplatePatch(live => {
+              const core = { ...(live.coreTrackers ?? {}) } as Record<string, unknown>;
+              core[toggleMap[item.id]] = false;
+              const cardKey = showCardMap[item.id];
+              if (cardKey) core[cardKey] = false;
+              const prevOv = (core.overrides as Record<string, Record<string, unknown>> | undefined) ?? {};
+              core.overrides = {
+                ...prevOv,
+                [item.id]: {
+                  ...(prevOv[item.id] ?? {}),
+                  deleted: true,
+                },
+              };
+              return { coreTrackers: core as unknown as LumiStatsTemplate['coreTrackers'] };
+            }, `Deleted built-in tracker "${cfg.label}"`);
+            ctrl.notify(`Removed "${cfg.label}".`);
+          }, {
+            className: 'ls-btn-sm ls-btn-icon ls-btn-ghost ls-btn-danger',
+            title: `Remove "${cfg.label}"`,
+          }),
         );
         row.append(left, right);
         builtCard.append(row);
