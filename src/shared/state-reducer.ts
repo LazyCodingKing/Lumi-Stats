@@ -255,29 +255,37 @@ function normalizeRelationLink(
   return fallback;
 }
 
-function inferInitialPeerBondMeters(
-  label: string,
-  attitude: string,
-): { affinity: number; trust: number } {
-  const combined = `${label} ${attitude}`.toLowerCase();
-  if (
-    /\b(?:rival|enemy|hostile|bitter|ex-|ex\b|nemesis|distrust|wary|suspicious|cold|resent|feud|threat|antagonist)\b/.test(
-      combined,
-    )
-  ) {
-    return { affinity: 32, trust: 28 };
+function isNumericCharacterMeterSchema(s: StatSchemaDef): boolean {
+  return (
+    s.enabled &&
+    s.scope === 'character' &&
+    ['meter', 'number', 'clock', 'pips', 'hearts', 'currency'].includes(s.kind) &&
+    !(s.displayStyle && s.displayStyle !== 'auto')
+  );
+}
+
+function seedPeerBondMetersFromTemplate(
+  meters: Record<string, number | string | boolean>,
+  template: LumiStatsTemplate,
+): Record<string, number | string | boolean> {
+  const activeCharIds = new Set(
+    template.stats.filter(s => s.enabled && s.scope === 'character').map(s => s.id),
+  );
+  const out: Record<string, number | string | boolean> = {};
+  for (const [k, v] of Object.entries(meters)) {
+    if (activeCharIds.has(k)) out[k] = v;
   }
-  if (
-    /\b(?:sister|brother|mother|father|family|roommate|best\s+friend|close\s+friend|loyal|ally|devoted|partner|lover|confidant|trusted|protective)\b/.test(
-      combined,
-    )
-  ) {
-    return { affinity: 74, trust: 72 };
+  for (const schema of template.stats) {
+    if (!isNumericCharacterMeterSchema(schema)) continue;
+    if (out[schema.id] === undefined) {
+      const def =
+        typeof schema.defaultValue === 'number' && Number.isFinite(schema.defaultValue)
+          ? schema.defaultValue
+          : schema.min;
+      out[schema.id] = Math.max(schema.min, Math.min(schema.max, Math.round(def)));
+    }
   }
-  if (/\b(?:colleague|advocate|lawyer|doctor|assistant|retainer|maid|butler|associate|mentor)\b/.test(combined)) {
-    return { affinity: 58, trust: 65 };
-  }
-  return { affinity: 50, trust: 50 };
+  return out;
 }
 
 function parseNumericStringMutation(
@@ -778,22 +786,11 @@ export function applyTurnPatch(
     if (nameSlug && next.characters[nameSlug]) return next.characters[nameSlug];
 
     const all = Object.values(next.characters);
-    const exact = all.find(
+    return all.find(
       c =>
         c.name.toLowerCase() === lowName ||
         c.aliases.some(a => a.toLowerCase() === lowName),
     );
-    if (exact) return exact;
-
-    if (!lowName) return undefined;
-    const tokenMatches = all.filter(c => {
-      const cWords = c.name.toLowerCase().split(/\s+/).filter(Boolean);
-      const inWords = lowName.split(/\s+/).filter(Boolean);
-      if (inWords.length === 1 && cWords.length > 1 && cWords[0] === inWords[0]) return true;
-      if (cWords.length === 1 && inWords.length > 1 && inWords[0] === cWords[0]) return true;
-      return false;
-    });
-    return tokenMatches.length === 1 ? tokenMatches[0] : undefined;
   };
 
   const parsePresenceFlag = (val: unknown): boolean | undefined => {
@@ -1059,36 +1056,84 @@ export function applyTurnPatch(
         }
 
         const prevBond = char.peerBonds[targetSlug];
-        const nextMeters: Record<string, number> = { ...(prevBond?.meters ?? {}) };
-
-        const resolveBondNum = (rawV: unknown, prevN: number): number | undefined => {
-          if (typeof rawV === 'number' && Number.isFinite(rawV)) {
-            return Math.max(0, Math.min(100, Math.round(rawV)));
-          }
-          if (typeof rawV === 'string') {
-            const t = rawV.trim();
-            if (/^[+-]\d+(?:\.\d+)?$/.test(t)) {
-              return Math.max(0, Math.min(100, Math.round(prevN + Number(t))));
-            }
-            const n = Number(t);
-            if (Number.isFinite(n)) return Math.max(0, Math.min(100, Math.round(n)));
-          }
-          return undefined;
+        const nextMeters: Record<string, number | string | boolean> = {
+          ...(prevBond?.meters ?? {}),
         };
 
-        for (const [bk, bv] of Object.entries(bObj)) {
-          if (['target', 'to', 'toId', 'toName', 'name', 'label', 'attitude', 'thought', 'dynamic'].includes(bk)) {
-            continue;
-          }
-          if (bk === 'meters' && bv && typeof bv === 'object' && !Array.isArray(bv)) {
-            for (const [mk, mv] of Object.entries(bv as Record<string, unknown>)) {
-              const resolved = resolveBondNum(mv, nextMeters[mk] ?? 50);
-              if (resolved !== undefined) nextMeters[mk] = resolved;
+        const resolveSchemaBondValue = (
+          schema: StatSchemaDef,
+          rawV: unknown,
+          prevVal: number | string | boolean | undefined,
+        ): number | string | boolean | undefined => {
+          if (rawV === null || rawV === undefined) return undefined;
+          const unwrapped =
+            typeof rawV === 'object' && !Array.isArray(rawV) && 'value' in (rawV as Record<string, unknown>)
+              ? (rawV as StatPatchInput).value
+              : rawV;
+          const explicitDelta =
+            typeof rawV === 'object' && !Array.isArray(rawV) && (rawV as StatPatchInput).op === 'delta';
+
+          if (isNumericCharacterMeterSchema(schema)) {
+            const baseNum =
+              typeof prevVal === 'number' && Number.isFinite(prevVal)
+                ? prevVal
+                : typeof schema.defaultValue === 'number' && Number.isFinite(schema.defaultValue)
+                  ? schema.defaultValue
+                  : schema.min;
+
+            if (typeof unwrapped === 'number' && Number.isFinite(unwrapped)) {
+              const target = explicitDelta ? baseNum + unwrapped : unwrapped;
+              return Math.max(schema.min, Math.min(schema.max, Math.round(target)));
             }
-            continue;
+            if (typeof unwrapped === 'string') {
+              const t = cleanStringValue(unwrapped);
+              const signed = t.match(/^([+-])\s*(\d+(?:\.\d+)?)$/);
+              if (signed) {
+                const delta = Number(`${signed[1]}${signed[2]}`);
+                return Math.max(schema.min, Math.min(schema.max, Math.round(baseNum + delta)));
+              }
+              const plain = Number(t);
+              if (Number.isFinite(plain)) {
+                const target = explicitDelta ? baseNum + plain : plain;
+                return Math.max(schema.min, Math.min(schema.max, Math.round(target)));
+              }
+            }
+            return undefined;
           }
-          const resolved = resolveBondNum(bv, nextMeters[bk] ?? 50);
-          if (resolved !== undefined) nextMeters[bk] = resolved;
+
+          if (schema.kind === 'boolean') {
+            return unwrapped === true || unwrapped === 1 || String(unwrapped).toLowerCase() === 'true';
+          }
+          const txt = cleanStringValue(String(unwrapped)).slice(0, 1000);
+          return txt || undefined;
+        };
+
+        const applyBondEntry = (rawKey: string, rawVal: unknown) => {
+          const schema = matchStatSchema(template.stats, rawKey, 'character');
+          if (!schema || !schema.enabled) return;
+          const resolved = resolveSchemaBondValue(schema, rawVal, nextMeters[schema.id]);
+          if (resolved !== undefined) {
+            nextMeters[schema.id] = resolved;
+          }
+        };
+
+        const RESERVED_BOND_KEYS = new Set([
+          'target', 'to', 'toId', 'toName', 'name', 'label', 'relation', 'category',
+          'attitude', 'note', 'thought', 'dynamic', 'meters', 'stats',
+        ]);
+        if (bObj.meters && typeof bObj.meters === 'object' && !Array.isArray(bObj.meters)) {
+          for (const [mk, mv] of Object.entries(bObj.meters as Record<string, unknown>)) {
+            applyBondEntry(mk, mv);
+          }
+        }
+        if (bObj.stats && typeof bObj.stats === 'object' && !Array.isArray(bObj.stats)) {
+          for (const [mk, mv] of Object.entries(bObj.stats as Record<string, unknown>)) {
+            applyBondEntry(mk, mv);
+          }
+        }
+        for (const [bk, bv] of Object.entries(bObj)) {
+          if (RESERVED_BOND_KEYS.has(bk)) continue;
+          applyBondEntry(bk, bv);
         }
 
         const resolvedLabel = cleanStringValue(
@@ -1102,13 +1147,6 @@ export function applyTurnPatch(
           typeof bObj.category === 'string' && validCat.has(bObj.category)
             ? (bObj.category as BondCategory)
             : prevBond?.category ?? inferBondCategory(resolvedLabel, resolvedAttitude);
-        const inferred = inferInitialPeerBondMeters(resolvedLabel, resolvedAttitude);
-        if (nextMeters.affinity === undefined) {
-          nextMeters.affinity = nextMeters.affection ?? inferred.affinity;
-        }
-        if (nextMeters.trust === undefined) {
-          nextMeters.trust = nextMeters.loyalty ?? inferred.trust;
-        }
 
         char.peerBonds[targetSlug] = {
           fromId: charId,
@@ -1117,11 +1155,19 @@ export function applyTurnPatch(
           label: resolvedLabel,
           attitude: resolvedAttitude,
           category: resolvedCategory,
-          meters: nextMeters,
+          meters: seedPeerBondMetersFromTemplate(nextMeters, template),
           updatedTurn: next.turnCount,
         };
 
         if (!next.characters[targetSlug]) {
+          const stubMeters: CharacterRecord['meters'] = {};
+          for (const schema of template.stats.filter(s => s.enabled && s.scope === 'character')) {
+            stubMeters[schema.id] = {
+              value: schema.defaultValue,
+              calibrated: false,
+              locked: schema.locked,
+            };
+          }
           next.characters[targetSlug] = {
             id: targetSlug,
             name: resolvedTargetName,
@@ -1134,7 +1180,7 @@ export function applyTurnPatch(
             immediateGoal: '',
             attire: '',
             fields: {},
-            meters: {},
+            meters: stubMeters,
             peerBonds: {},
             conditions: [],
             secrets: [],
@@ -1181,16 +1227,14 @@ export function applyTurnPatch(
     }
   }
 
-  // Ensure existing NPC↔NPC peer bonds have category & meters normalized (without inventing fake filler bonds)
+  // Ensure existing NPC↔NPC peer bonds have category & template-defined character meters normalized (no hardcoded stats)
   if (template.surfaces.trackNpcBonds !== false) {
     const castList = Object.values(next.characters);
     for (const charA of castList) {
       charA.peerBonds ??= {};
       for (const bondAB of Object.values(charA.peerBonds)) {
         bondAB.category ??= inferBondCategory(bondAB.label, bondAB.attitude);
-        const inferred = inferInitialPeerBondMeters(bondAB.label, bondAB.attitude);
-        bondAB.meters.affinity ??= inferred.affinity;
-        bondAB.meters.trust ??= inferred.trust;
+        bondAB.meters = seedPeerBondMetersFromTemplate(bondAB.meters ?? {}, template);
       }
     }
   }

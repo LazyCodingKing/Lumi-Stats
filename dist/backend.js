@@ -2789,8 +2789,13 @@ ${activeContinuityCategoryRules.join(`
         ...characters.filter((c) => !c.present)
       ];
       outLines.push(`Cast (${characters.length}):`);
+      const activeCharIds = new Set(charSchemas.map((s) => s.id));
+      const formatPeerBond = (b) => {
+        const mList = Object.entries(b.meters ?? {}).filter(([mk, mv]) => activeCharIds.has(mk) && mv !== "" && mv !== "None").map(([mk, mv]) => `${mk}=${mv}`);
+        return mList.length ? `\u2192${b.toName}(${b.label}: ${mList.join(",")})` : `\u2192${b.toName}(${b.label})`;
+      };
       for (const actor of presentFirst) {
-        const peerBonds = template.surfaces.trackNpcBonds !== false ? Object.values(actor.peerBonds ?? {}).map((b) => `\u2192${b.toName}(${b.label})`).join(", ") : "";
+        const peerBonds = template.surfaces.trackNpcBonds !== false ? Object.values(actor.peerBonds ?? {}).map(formatPeerBond).join(", ") : "";
         if (!actor.present) {
           const isOffscreenSkipped = (id) => ["acted", "observation", "plan", "mask", "polarity", "knowledge", "oppurtunity"].includes(id);
           const compactMeters = charSchemas.filter((s) => !isOffscreenSkipped(s.id)).map((s) => {
@@ -3034,13 +3039,22 @@ function buildCompactFormatExample(state, template, hasPersistedState = false, r
       charExample[f.id] = "...";
   }
   Object.assign(charExample, flatMeters);
-  if (template.surfaces.trackNpcBonds !== false && (!isCompact || !hasPersistedState)) {
+  if (template.surfaces.trackNpcBonds !== false) {
+    const samplePeerMeters = {};
+    for (const s of charSchemas) {
+      if (!["meter", "number", "clock", "pips", "hearts", "currency"].includes(s.kind))
+        continue;
+      if (s.displayStyle && s.displayStyle !== "auto")
+        continue;
+      samplePeerMeters[s.id] = isCompact && hasPersistedState ? "+N" : sampleValueForSchema(s, false);
+    }
     charExample.peerBonds = [
       {
         target: "NPC2",
         label: "Relation",
         category: "family|friend|romance|rival|professional|neutral",
-        attitude: "Why"
+        attitude: "Why",
+        ...Object.keys(samplePeerMeters).length ? { meters: samplePeerMeters } : {}
       }
     ];
   }
@@ -3315,7 +3329,7 @@ ${corePromptHints.join(`
     `<lumi_stats_protocol>`,
     `REQUIRED: End EVERY reply (after prose/footers) with <lumi-stats>{JSON}</lumi-stats> (ASCII spaces only; omit unchanged keys).`,
     `1. CAST: Active/mentioned NPCs in "characters[]" ("present": true|false, "location", "bondToPlayer", "bondFromPlayer" if new/changed). Use "+N"/"-N" deltas for numeric meters.`,
-    template.surfaces.trackNpcBonds !== false ? `2. PEER BONDS ("peerBonds[]"): {"target","label","category":"family|friend|romance|rival|professional|neutral","attitude"}.` : "",
+    template.surfaces.trackNpcBonds !== false ? `2. PEER BONDS ("peerBonds[]"): Track NPC\u2194NPC bonds whenever two NPCs interact, or when prose references an offscreen person (e.g. a relative, caller, colleague) or a separate identity/original body (never collapse distinct identities). Set {"target","label","category":"family|friend|romance|rival|professional|neutral","attitude"${charNumeric.length ? `,"meters":{${charNumeric.map((s) => `"${s.id}":${s.min}..${s.max}`).join(",")}}` : ""}}.` : "",
     `3. UPDATE (${trackedTargets.join(", ")}):`,
     categoryRuleLines.length ? `Category Rules:
 ${categoryRuleLines.join(`
@@ -3756,18 +3770,25 @@ function normalizeRelationLink(raw, fallback) {
   }
   return fallback;
 }
-function inferInitialPeerBondMeters(label, attitude) {
-  const combined = `${label} ${attitude}`.toLowerCase();
-  if (/\b(?:rival|enemy|hostile|bitter|ex-|ex\b|nemesis|distrust|wary|suspicious|cold|resent|feud|threat|antagonist)\b/.test(combined)) {
-    return { affinity: 32, trust: 28 };
+function isNumericCharacterMeterSchema(s) {
+  return s.enabled && s.scope === "character" && ["meter", "number", "clock", "pips", "hearts", "currency"].includes(s.kind) && !(s.displayStyle && s.displayStyle !== "auto");
+}
+function seedPeerBondMetersFromTemplate(meters, template) {
+  const activeCharIds = new Set(template.stats.filter((s) => s.enabled && s.scope === "character").map((s) => s.id));
+  const out = {};
+  for (const [k, v] of Object.entries(meters)) {
+    if (activeCharIds.has(k))
+      out[k] = v;
   }
-  if (/\b(?:sister|brother|mother|father|family|roommate|best\s+friend|close\s+friend|loyal|ally|devoted|partner|lover|confidant|trusted|protective)\b/.test(combined)) {
-    return { affinity: 74, trust: 72 };
+  for (const schema of template.stats) {
+    if (!isNumericCharacterMeterSchema(schema))
+      continue;
+    if (out[schema.id] === undefined) {
+      const def = typeof schema.defaultValue === "number" && Number.isFinite(schema.defaultValue) ? schema.defaultValue : schema.min;
+      out[schema.id] = Math.max(schema.min, Math.min(schema.max, Math.round(def)));
+    }
   }
-  if (/\b(?:colleague|advocate|lawyer|doctor|assistant|retainer|maid|butler|associate|mentor)\b/.test(combined)) {
-    return { affinity: 58, trust: 65 };
-  }
-  return { affinity: 50, trust: 50 };
+  return out;
 }
 function parseNumericStringMutation(trimmed, explicitOp, reason) {
   if (!trimmed || trimmed === "\u2205")
@@ -4109,21 +4130,7 @@ function applyTurnPatch(before, template, patch, options = {}) {
     if (nameSlug && next.characters[nameSlug])
       return next.characters[nameSlug];
     const all = Object.values(next.characters);
-    const exact = all.find((c) => c.name.toLowerCase() === lowName || c.aliases.some((a) => a.toLowerCase() === lowName));
-    if (exact)
-      return exact;
-    if (!lowName)
-      return;
-    const tokenMatches = all.filter((c) => {
-      const cWords = c.name.toLowerCase().split(/\s+/).filter(Boolean);
-      const inWords = lowName.split(/\s+/).filter(Boolean);
-      if (inWords.length === 1 && cWords.length > 1 && cWords[0] === inWords[0])
-        return true;
-      if (cWords.length === 1 && inWords.length > 1 && inWords[0] === cWords[0])
-        return true;
-      return false;
-    });
-    return tokenMatches.length === 1 ? tokenMatches[0] : undefined;
+    return all.find((c) => c.name.toLowerCase() === lowName || c.aliases.some((a) => a.toLowerCase() === lowName));
   };
   const parsePresenceFlag = (val) => {
     if (typeof val === "boolean")
@@ -4368,49 +4375,85 @@ function applyTurnPatch(before, template, patch, options = {}) {
           continue;
         }
         const prevBond = char.peerBonds[targetSlug];
-        const nextMeters = { ...prevBond?.meters ?? {} };
-        const resolveBondNum = (rawV, prevN) => {
-          if (typeof rawV === "number" && Number.isFinite(rawV)) {
-            return Math.max(0, Math.min(100, Math.round(rawV)));
-          }
-          if (typeof rawV === "string") {
-            const t = rawV.trim();
-            if (/^[+-]\d+(?:\.\d+)?$/.test(t)) {
-              return Math.max(0, Math.min(100, Math.round(prevN + Number(t))));
-            }
-            const n = Number(t);
-            if (Number.isFinite(n))
-              return Math.max(0, Math.min(100, Math.round(n)));
-          }
-          return;
+        const nextMeters = {
+          ...prevBond?.meters ?? {}
         };
-        for (const [bk, bv] of Object.entries(bObj)) {
-          if (["target", "to", "toId", "toName", "name", "label", "attitude", "thought", "dynamic"].includes(bk)) {
-            continue;
-          }
-          if (bk === "meters" && bv && typeof bv === "object" && !Array.isArray(bv)) {
-            for (const [mk, mv] of Object.entries(bv)) {
-              const resolved = resolveBondNum(mv, nextMeters[mk] ?? 50);
-              if (resolved !== undefined)
-                nextMeters[mk] = resolved;
+        const resolveSchemaBondValue = (schema, rawV, prevVal) => {
+          if (rawV === null || rawV === undefined)
+            return;
+          const unwrapped = typeof rawV === "object" && !Array.isArray(rawV) && "value" in rawV ? rawV.value : rawV;
+          const explicitDelta = typeof rawV === "object" && !Array.isArray(rawV) && rawV.op === "delta";
+          if (isNumericCharacterMeterSchema(schema)) {
+            const baseNum = typeof prevVal === "number" && Number.isFinite(prevVal) ? prevVal : typeof schema.defaultValue === "number" && Number.isFinite(schema.defaultValue) ? schema.defaultValue : schema.min;
+            if (typeof unwrapped === "number" && Number.isFinite(unwrapped)) {
+              const target = explicitDelta ? baseNum + unwrapped : unwrapped;
+              return Math.max(schema.min, Math.min(schema.max, Math.round(target)));
             }
-            continue;
+            if (typeof unwrapped === "string") {
+              const t = cleanStringValue(unwrapped);
+              const signed = t.match(/^([+-])\s*(\d+(?:\.\d+)?)$/);
+              if (signed) {
+                const delta = Number(`${signed[1]}${signed[2]}`);
+                return Math.max(schema.min, Math.min(schema.max, Math.round(baseNum + delta)));
+              }
+              const plain = Number(t);
+              if (Number.isFinite(plain)) {
+                const target = explicitDelta ? baseNum + plain : plain;
+                return Math.max(schema.min, Math.min(schema.max, Math.round(target)));
+              }
+            }
+            return;
           }
-          const resolved = resolveBondNum(bv, nextMeters[bk] ?? 50);
-          if (resolved !== undefined)
-            nextMeters[bk] = resolved;
+          if (schema.kind === "boolean") {
+            return unwrapped === true || unwrapped === 1 || String(unwrapped).toLowerCase() === "true";
+          }
+          const txt = cleanStringValue(String(unwrapped)).slice(0, 1000);
+          return txt || undefined;
+        };
+        const applyBondEntry = (rawKey, rawVal) => {
+          const schema = matchStatSchema(template.stats, rawKey, "character");
+          if (!schema || !schema.enabled)
+            return;
+          const resolved = resolveSchemaBondValue(schema, rawVal, nextMeters[schema.id]);
+          if (resolved !== undefined) {
+            nextMeters[schema.id] = resolved;
+          }
+        };
+        const RESERVED_BOND_KEYS = new Set([
+          "target",
+          "to",
+          "toId",
+          "toName",
+          "name",
+          "label",
+          "relation",
+          "category",
+          "attitude",
+          "note",
+          "thought",
+          "dynamic",
+          "meters",
+          "stats"
+        ]);
+        if (bObj.meters && typeof bObj.meters === "object" && !Array.isArray(bObj.meters)) {
+          for (const [mk, mv] of Object.entries(bObj.meters)) {
+            applyBondEntry(mk, mv);
+          }
+        }
+        if (bObj.stats && typeof bObj.stats === "object" && !Array.isArray(bObj.stats)) {
+          for (const [mk, mv] of Object.entries(bObj.stats)) {
+            applyBondEntry(mk, mv);
+          }
+        }
+        for (const [bk, bv] of Object.entries(bObj)) {
+          if (RESERVED_BOND_KEYS.has(bk))
+            continue;
+          applyBondEntry(bk, bv);
         }
         const resolvedLabel = cleanStringValue(String(bObj.label ?? bObj.relation ?? bObj.dynamic ?? prevBond?.label ?? "Acquaintance"));
         const resolvedAttitude = cleanStringValue(String(bObj.attitude ?? bObj.note ?? bObj.thought ?? prevBond?.attitude ?? ""));
         const validCat = new Set(["family", "friend", "romance", "rival", "professional", "neutral"]);
         const resolvedCategory = typeof bObj.category === "string" && validCat.has(bObj.category) ? bObj.category : prevBond?.category ?? inferBondCategory(resolvedLabel, resolvedAttitude);
-        const inferred = inferInitialPeerBondMeters(resolvedLabel, resolvedAttitude);
-        if (nextMeters.affinity === undefined) {
-          nextMeters.affinity = nextMeters.affection ?? inferred.affinity;
-        }
-        if (nextMeters.trust === undefined) {
-          nextMeters.trust = nextMeters.loyalty ?? inferred.trust;
-        }
         char.peerBonds[targetSlug] = {
           fromId: charId,
           toId: targetSlug,
@@ -4418,10 +4461,18 @@ function applyTurnPatch(before, template, patch, options = {}) {
           label: resolvedLabel,
           attitude: resolvedAttitude,
           category: resolvedCategory,
-          meters: nextMeters,
+          meters: seedPeerBondMetersFromTemplate(nextMeters, template),
           updatedTurn: next.turnCount
         };
         if (!next.characters[targetSlug]) {
+          const stubMeters = {};
+          for (const schema of template.stats.filter((s) => s.enabled && s.scope === "character")) {
+            stubMeters[schema.id] = {
+              value: schema.defaultValue,
+              calibrated: false,
+              locked: schema.locked
+            };
+          }
           next.characters[targetSlug] = {
             id: targetSlug,
             name: resolvedTargetName,
@@ -4434,7 +4485,7 @@ function applyTurnPatch(before, template, patch, options = {}) {
             immediateGoal: "",
             attire: "",
             fields: {},
-            meters: {},
+            meters: stubMeters,
             peerBonds: {},
             conditions: [],
             secrets: [],
@@ -4482,9 +4533,7 @@ function applyTurnPatch(before, template, patch, options = {}) {
       charA.peerBonds ??= {};
       for (const bondAB of Object.values(charA.peerBonds)) {
         bondAB.category ??= inferBondCategory(bondAB.label, bondAB.attitude);
-        const inferred = inferInitialPeerBondMeters(bondAB.label, bondAB.attitude);
-        bondAB.meters.affinity ??= inferred.affinity;
-        bondAB.meters.trust ??= inferred.trust;
+        bondAB.meters = seedPeerBondMetersFromTemplate(bondAB.meters ?? {}, template);
       }
     }
   }
@@ -6378,6 +6427,13 @@ class LumiStatsService {
           actor.meters[toId] = { ...actor.meters[fromId] };
         }
         delete actor.meters[fromId];
+        for (const bond of Object.values(actor.peerBonds ?? {})) {
+          if (bond.meters && bond.meters[fromId] !== undefined && bond.meters[toId] === undefined) {
+            bond.meters[toId] = bond.meters[fromId];
+          }
+          if (bond.meters)
+            delete bond.meters[fromId];
+        }
       }
       for (const mod of nextState.modifiers) {
         if (mod.statId === fromId)
@@ -6398,6 +6454,12 @@ class LumiStatsService {
       for (const key of Object.keys(actor.meters)) {
         if (!activeCharIds.has(key))
           delete actor.meters[key];
+      }
+      for (const bond of Object.values(actor.peerBonds ?? {})) {
+        for (const mk of Object.keys(bond.meters ?? {})) {
+          if (!activeCharIds.has(mk))
+            delete bond.meters[mk];
+        }
       }
     }
     for (const def of template.stats) {
@@ -6456,6 +6518,15 @@ class LumiStatsService {
       const snap = await this.storage.loadCampaign(resolvedUser, chatId);
       const nextState = structuredClone(snap.state);
       this.reconcileStateWithTemplate(nextState, template);
+      const activeCharStatIds = new Set(template.stats.filter((s) => s.enabled && s.scope === "character").map((s) => s.id));
+      for (const actor of Object.values(nextState.characters)) {
+        for (const bond of Object.values(actor.peerBonds ?? {})) {
+          for (const mk of Object.keys(bond.meters ?? {})) {
+            if (!activeCharStatIds.has(mk))
+              delete bond.meters[mk];
+          }
+        }
+      }
       recomputeDerivedStats(template.stats, nextState, template.categories ?? []);
       await this.storage.commitCampaign(resolvedUser, chatId, snap.state, nextState, reason);
     });
@@ -6810,6 +6881,15 @@ class LumiStatsService {
             }
             const statRenames = Array.isArray(payload.statRenames) ? payload.statRenames : [];
             this.reconcileStateWithTemplate(nextState, nextTemplate, statRenames);
+            const activeCharStatIds = new Set(nextTemplate.stats.filter((s) => s.enabled && s.scope === "character").map((s) => s.id));
+            for (const actor of Object.values(nextState.characters)) {
+              for (const bond of Object.values(actor.peerBonds ?? {})) {
+                for (const mk of Object.keys(bond.meters ?? {})) {
+                  if (!activeCharStatIds.has(mk))
+                    delete bond.meters[mk];
+                }
+              }
+            }
           }
           if (payload.patch && typeof payload.patch === "object") {
             const reduced = applyTurnPatch(nextState, nextTemplate, payload.patch, { isManualEdit: true });

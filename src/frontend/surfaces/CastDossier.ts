@@ -1064,14 +1064,39 @@ export function renderCastDossierSurface(
           cell.append(el('div', 'ls-thought-box', `“${bond.attitude}”`));
         }
         for (const [mKey, mVal] of Object.entries(bond.meters)) {
-          const mLabel = mKey.charAt(0).toUpperCase() + mKey.slice(1);
+          const schema = template.stats.find(s => s.id === mKey && s.scope === 'character');
+          if (schema && !schema.enabled) continue;
+          const mLabel = schema ? `${schema.icon} ${schema.label}` : mKey;
           const mRow = el('div', 'ls-row-between');
-          mRow.append(el('small', 'ls-muted', mLabel), el('strong', '', `${mVal}/100`));
-          const track = el('div', 'ls-bar-track');
-          const fill = el('div', 'ls-bar-fill');
-          fill.style.width = `${Math.max(0, Math.min(100, mVal))}%`;
-          track.append(fill);
-          cell.append(mRow, track);
+          mRow.append(el('small', 'ls-muted', mLabel), el('strong', '', String(mVal)));
+          cell.append(mRow);
+
+          if (typeof mVal === 'number') {
+            const min = schema?.min ?? 0;
+            const max = schema?.max ?? 100;
+            const span = Math.max(1, max - min);
+            const track = el('div', 'ls-bar-track');
+            const fill = el('div', 'ls-bar-fill');
+            if (schema?.color) fill.style.setProperty('--ls-bar-color', schema.color);
+            if (min < 0 && max > 0) {
+              track.dataset.bipolar = 'true';
+              const zeroPct = ((0 - min) / span) * 100;
+              if (mVal >= 0) {
+                fill.style.marginLeft = `${zeroPct.toFixed(1)}%`;
+                fill.style.width = `${Math.min(100 - zeroPct, (mVal / max) * (100 - zeroPct)).toFixed(1)}%`;
+              } else {
+                const wPct = (Math.abs(mVal) / Math.abs(min)) * zeroPct;
+                fill.style.marginLeft = `${Math.max(0, zeroPct - wPct).toFixed(1)}%`;
+                fill.style.width = `${Math.min(zeroPct, wPct).toFixed(1)}%`;
+                fill.style.background = 'var(--ls-danger)';
+              }
+            } else {
+              const pct = Math.max(0, Math.min(100, Math.round(((mVal - min) / span) * 100)));
+              fill.style.width = `${pct}%`;
+            }
+            track.append(fill);
+            cell.append(track);
+          }
         }
         grid.append(cell);
       }

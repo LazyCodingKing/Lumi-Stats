@@ -7292,9 +7292,61 @@ function openPlayerBondEditorModal(ctrl, actor) {
     body.append(youWrap, youNoteWrap, npcWrap, npcNoteWrap, catWrap, saveBtn);
   });
 }
+function getTemplateCharBondSchemas(schemas) {
+  return schemas.filter((s) => s.enabled && s.scope === "character" && ["meter", "number", "clock", "pips", "hearts", "currency"].includes(s.kind) && !(s.displayStyle && s.displayStyle !== "auto"));
+}
+function renderDynamicPeerBondMeters(meters, charSchemas) {
+  if (!meters)
+    return null;
+  const schemaMap = new Map(charSchemas.map((s) => [s.id, s]));
+  const entries = Object.entries(meters).filter(([k, v]) => {
+    const schema = schemaMap.get(k);
+    if (!schema || !schema.enabled)
+      return false;
+    return v !== undefined && v !== "" && v !== "None";
+  });
+  if (!entries.length)
+    return null;
+  const grid = el("div", "ls-cast-mini-grid");
+  grid.style.marginTop = "4px";
+  for (const [mKey, mVal] of entries) {
+    const schema = schemaMap.get(mKey);
+    const cell = el("div", "ls-cast-mini-meter");
+    cell.style.setProperty("--ls-bar-color", schema.color || "var(--ls-primary)");
+    const top = el("div", "ls-row-between");
+    top.append(el("small", "ls-muted", `${schema.icon} ${schema.label}`), el("strong", "", String(mVal)));
+    cell.append(top);
+    if (typeof mVal === "number") {
+      const span = Math.max(1, schema.max - schema.min);
+      const track = el("div", "ls-bar-track");
+      const fill = el("div", "ls-bar-fill");
+      if (schema.min < 0 && schema.max > 0) {
+        track.dataset.bipolar = "true";
+        const zeroPct = (0 - schema.min) / span * 100;
+        if (mVal >= 0) {
+          fill.style.marginLeft = `${zeroPct.toFixed(1)}%`;
+          fill.style.width = `${Math.min(100 - zeroPct, mVal / schema.max * (100 - zeroPct)).toFixed(1)}%`;
+        } else {
+          const wPct = Math.abs(mVal) / Math.abs(schema.min) * zeroPct;
+          fill.style.marginLeft = `${Math.max(0, zeroPct - wPct).toFixed(1)}%`;
+          fill.style.width = `${Math.min(zeroPct, wPct).toFixed(1)}%`;
+          fill.style.background = "var(--ls-danger)";
+        }
+      } else {
+        const pct = Math.max(0, Math.min(100, Math.round((mVal - schema.min) / span * 100)));
+        fill.style.width = `${pct}%`;
+      }
+      track.append(fill);
+      cell.append(track);
+    }
+    grid.append(cell);
+  }
+  return grid;
+}
 function openNpcBondEditorModal(ctrl, sourceActor, existingBond) {
-  const { state } = ctrl.snapshot;
+  const { state, template } = ctrl.snapshot;
   const otherActors = Object.values(state.characters).filter((c) => c.id !== sourceActor.id);
+  const charSchemas = getTemplateCharBondSchemas(template.stats);
   ctrl.modals.open({
     title: existingBond ? `\uD83E\uDD1D Edit NPC Bond: ${sourceActor.name} ⇄ ${existingBond.toName}` : `➕ Add Bond from ${sourceActor.name} to Another NPC`,
     width: 560
@@ -7332,11 +7384,51 @@ function openNpcBondEditorModal(ctrl, sourceActor, existingBond) {
     attWrap.append(attInp);
     const peerActor = existingBond ? state.characters[existingBond.toId] : otherActors[0];
     const reverseExisting = peerActor?.peerBonds?.[sourceActor.id];
+    const fwdMeterInputs = new Map;
+    if (charSchemas.length > 0) {
+      const fwdGridWrap = el("div", "ls-label", `${sourceActor.name}'s Stats Toward Them`);
+      const fwdGrid = el("div", "ls-grid");
+      for (const schema of charSchemas) {
+        const curVal = existingBond?.meters?.[schema.id] ?? schema.defaultValue;
+        const wrapCell = el("label", "ls-label", `${schema.icon} ${schema.label} (${schema.min}..${schema.max})`);
+        const inp = el("input", "ls-input");
+        inp.type = "number";
+        inp.min = String(schema.min);
+        inp.max = String(schema.max);
+        inp.step = String(schema.step || 1);
+        inp.value = String(typeof curVal === "number" ? curVal : schema.defaultValue);
+        wrapCell.append(inp);
+        fwdGrid.append(wrapCell);
+        fwdMeterInputs.set(schema.id, inp);
+      }
+      fwdGridWrap.append(fwdGrid);
+      body.append(fwdGridWrap);
+    }
     const revLabelWrap = el("label", "ls-label", `Their Relation Back to ${sourceActor.name} (Optional)`);
     const revLabelInp = el("input", "ls-input");
     revLabelInp.placeholder = "e.g. Younger Brother, Loyal Friend…";
     revLabelInp.value = reverseExisting?.label ?? "";
     revLabelWrap.append(revLabelInp);
+    const revMeterInputs = new Map;
+    if (charSchemas.length > 0) {
+      const revGridWrap = el("div", "ls-label", `Their Stats Back Toward ${sourceActor.name} (Optional)`);
+      const revGrid = el("div", "ls-grid");
+      for (const schema of charSchemas) {
+        const curVal = reverseExisting?.meters?.[schema.id] ?? schema.defaultValue;
+        const wrapCell = el("label", "ls-label", `${schema.icon} ${schema.label} (${schema.min}..${schema.max})`);
+        const inp = el("input", "ls-input");
+        inp.type = "number";
+        inp.min = String(schema.min);
+        inp.max = String(schema.max);
+        inp.step = String(schema.step || 1);
+        inp.value = String(typeof curVal === "number" ? curVal : schema.defaultValue);
+        wrapCell.append(inp);
+        revGrid.append(wrapCell);
+        revMeterInputs.set(schema.id, inp);
+      }
+      revGridWrap.append(revGrid);
+      revLabelWrap.append(revGridWrap);
+    }
     let selectedCat = existingBond?.category ?? inferBondCategory(existingBond?.label ?? "", existingBond?.attitude ?? "");
     const catWrap = el("div", "ls-label", "Bond Type / Color");
     const catRow = el("div", "ls-row");
@@ -7361,15 +7453,29 @@ function openNpcBondEditorModal(ctrl, sourceActor, existingBond) {
         return;
       const label = labelInp.value.trim() || "Acquaintance";
       const attitude = attInp.value.trim();
+      const fwdMeters = {};
+      for (const schema of charSchemas) {
+        const raw = Number(fwdMeterInputs.get(schema.id)?.value);
+        if (Number.isFinite(raw)) {
+          fwdMeters[schema.id] = Math.max(schema.min, Math.min(schema.max, Math.round(raw)));
+        }
+      }
       const charactersPatch = [
         {
           id: sourceActor.id,
           name: sourceActor.name,
-          peerBonds: [{ target: targetName, label, attitude, category: selectedCat }]
+          peerBonds: [{ target: targetName, label, attitude, category: selectedCat, meters: fwdMeters }]
         }
       ];
       const revLabel = revLabelInp.value.trim();
       if (revLabel) {
+        const revMeters = {};
+        for (const schema of charSchemas) {
+          const raw = Number(revMeterInputs.get(schema.id)?.value);
+          if (Number.isFinite(raw)) {
+            revMeters[schema.id] = Math.max(schema.min, Math.min(schema.max, Math.round(raw)));
+          }
+        }
         charactersPatch.push({
           name: targetName,
           peerBonds: [
@@ -7377,7 +7483,8 @@ function openNpcBondEditorModal(ctrl, sourceActor, existingBond) {
               target: sourceActor.name,
               label: revLabel,
               attitude: reverseExisting?.attitude ?? "",
-              category: selectedCat
+              category: selectedCat,
+              meters: revMeters
             }
           ]
         });
@@ -7392,7 +7499,8 @@ function openNpcBondEditorModal(ctrl, sourceActor, existingBond) {
   });
 }
 function renderRelationshipWebSurface(ctrl, onOpenDossier) {
-  const { state } = ctrl.snapshot;
+  const { state, template } = ctrl.snapshot;
+  const charBondSchemas = getTemplateCharBondSchemas(template.stats);
   const wrap = el("div", "ls-stack");
   const characters = Object.values(state.characters);
   const youName = state.player.name || "You";
@@ -7808,8 +7916,14 @@ ${actor.name} → You: ${npcToYou.label}`;
       const twoCol = el("div", "ls-bw-two-col");
       const boxA = el("div", "ls-bw-dir-box");
       boxA.append(el("small", "ls-kicker", `${pair.a.name} → ${pair.b.name}`), el("strong", "", pair.aToB?.label || "Not defined yet"), ...pair.aToB?.attitude ? [el("small", "ls-muted", pair.aToB.attitude)] : []);
+      const aMetersEl = renderDynamicPeerBondMeters(pair.aToB?.meters, charBondSchemas);
+      if (aMetersEl)
+        boxA.append(aMetersEl);
       const boxB = el("div", "ls-bw-dir-box");
       boxB.append(el("small", "ls-kicker", `${pair.b.name} → ${pair.a.name}`), el("strong", "", pair.bToA?.label || "Not defined yet"), ...pair.bToA?.attitude ? [el("small", "ls-muted", pair.bToA.attitude)] : []);
+      const bMetersEl = renderDynamicPeerBondMeters(pair.bToA?.meters, charBondSchemas);
+      if (bMetersEl)
+        boxB.append(bMetersEl);
       twoCol.append(boxA, boxB);
       pairCard.append(twoCol);
       npcSection.append(pairCard);
@@ -17915,14 +18029,40 @@ function renderCastDossierSurface(ctrl, compScope) {
           cell.append(el("div", "ls-thought-box", `“${bond.attitude}”`));
         }
         for (const [mKey, mVal] of Object.entries(bond.meters)) {
-          const mLabel = mKey.charAt(0).toUpperCase() + mKey.slice(1);
+          const schema = template.stats.find((s) => s.id === mKey && s.scope === "character");
+          if (schema && !schema.enabled)
+            continue;
+          const mLabel = schema ? `${schema.icon} ${schema.label}` : mKey;
           const mRow = el("div", "ls-row-between");
-          mRow.append(el("small", "ls-muted", mLabel), el("strong", "", `${mVal}/100`));
-          const track = el("div", "ls-bar-track");
-          const fill = el("div", "ls-bar-fill");
-          fill.style.width = `${Math.max(0, Math.min(100, mVal))}%`;
-          track.append(fill);
-          cell.append(mRow, track);
+          mRow.append(el("small", "ls-muted", mLabel), el("strong", "", String(mVal)));
+          cell.append(mRow);
+          if (typeof mVal === "number") {
+            const min = schema?.min ?? 0;
+            const max = schema?.max ?? 100;
+            const span = Math.max(1, max - min);
+            const track = el("div", "ls-bar-track");
+            const fill = el("div", "ls-bar-fill");
+            if (schema?.color)
+              fill.style.setProperty("--ls-bar-color", schema.color);
+            if (min < 0 && max > 0) {
+              track.dataset.bipolar = "true";
+              const zeroPct = (0 - min) / span * 100;
+              if (mVal >= 0) {
+                fill.style.marginLeft = `${zeroPct.toFixed(1)}%`;
+                fill.style.width = `${Math.min(100 - zeroPct, mVal / max * (100 - zeroPct)).toFixed(1)}%`;
+              } else {
+                const wPct = Math.abs(mVal) / Math.abs(min) * zeroPct;
+                fill.style.marginLeft = `${Math.max(0, zeroPct - wPct).toFixed(1)}%`;
+                fill.style.width = `${Math.min(zeroPct, wPct).toFixed(1)}%`;
+                fill.style.background = "var(--ls-danger)";
+              }
+            } else {
+              const pct = Math.max(0, Math.min(100, Math.round((mVal - min) / span * 100)));
+              fill.style.width = `${pct}%`;
+            }
+            track.append(fill);
+            cell.append(track);
+          }
         }
         grid.append(cell);
       }

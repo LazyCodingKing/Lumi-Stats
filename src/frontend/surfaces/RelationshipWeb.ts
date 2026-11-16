@@ -4,6 +4,7 @@ import type {
   CharacterRecord,
   NpcBondRecord,
   RelationLink,
+  StatSchemaDef,
 } from '../../shared/types';
 import { btn, el, type LumiFrontendController } from '../controller';
 
@@ -193,13 +194,78 @@ export function openPlayerBondEditorModal(
  * Keeps the exported signature `openNpcBondEditorModal(ctrl, sourceActor, existingBond)`
  * for CastDossier compatibility while editing real relation names & categories.
  */
+function getTemplateCharBondSchemas(schemas: StatSchemaDef[]): StatSchemaDef[] {
+  return schemas.filter(
+    s =>
+      s.enabled &&
+      s.scope === 'character' &&
+      ['meter', 'number', 'clock', 'pips', 'hearts', 'currency'].includes(s.kind) &&
+      !(s.displayStyle && s.displayStyle !== 'auto'),
+  );
+}
+
+function renderDynamicPeerBondMeters(
+  meters: Record<string, number | string | boolean> | undefined,
+  charSchemas: StatSchemaDef[],
+): HTMLElement | null {
+  if (!meters) return null;
+  const schemaMap = new Map(charSchemas.map(s => [s.id, s]));
+  const entries = Object.entries(meters).filter(([k, v]) => {
+    const schema = schemaMap.get(k);
+    if (!schema || !schema.enabled) return false;
+    return v !== undefined && v !== '' && v !== 'None';
+  });
+  if (!entries.length) return null;
+
+  const grid = el('div', 'ls-cast-mini-grid');
+  grid.style.marginTop = '4px';
+  for (const [mKey, mVal] of entries) {
+    const schema = schemaMap.get(mKey)!;
+    const cell = el('div', 'ls-cast-mini-meter');
+    cell.style.setProperty('--ls-bar-color', schema.color || 'var(--ls-primary)');
+    const top = el('div', 'ls-row-between');
+    top.append(
+      el('small', 'ls-muted', `${schema.icon} ${schema.label}`),
+      el('strong', '', String(mVal)),
+    );
+    cell.append(top);
+
+    if (typeof mVal === 'number') {
+      const span = Math.max(1, schema.max - schema.min);
+      const track = el('div', 'ls-bar-track');
+      const fill = el('div', 'ls-bar-fill');
+      if (schema.min < 0 && schema.max > 0) {
+        track.dataset.bipolar = 'true';
+        const zeroPct = ((0 - schema.min) / span) * 100;
+        if (mVal >= 0) {
+          fill.style.marginLeft = `${zeroPct.toFixed(1)}%`;
+          fill.style.width = `${Math.min(100 - zeroPct, (mVal / schema.max) * (100 - zeroPct)).toFixed(1)}%`;
+        } else {
+          const wPct = (Math.abs(mVal) / Math.abs(schema.min)) * zeroPct;
+          fill.style.marginLeft = `${Math.max(0, zeroPct - wPct).toFixed(1)}%`;
+          fill.style.width = `${Math.min(zeroPct, wPct).toFixed(1)}%`;
+          fill.style.background = 'var(--ls-danger)';
+        }
+      } else {
+        const pct = Math.max(0, Math.min(100, Math.round(((mVal - schema.min) / span) * 100)));
+        fill.style.width = `${pct}%`;
+      }
+      track.append(fill);
+      cell.append(track);
+    }
+    grid.append(cell);
+  }
+  return grid;
+}
+
 export function openNpcBondEditorModal(
   ctrl: LumiFrontendController,
   sourceActor: CharacterRecord,
   existingBond?: NpcBondRecord,
 ): void {
-  const { state } = ctrl.snapshot;
+  const { state, template } = ctrl.snapshot;
   const otherActors = Object.values(state.characters).filter(c => c.id !== sourceActor.id);
+  const charSchemas = getTemplateCharBondSchemas(template.stats);
 
   ctrl.modals.open(
     {
@@ -254,11 +320,53 @@ export function openNpcBondEditorModal(
       const peerActor = existingBond ? state.characters[existingBond.toId] : otherActors[0];
       const reverseExisting = peerActor?.peerBonds?.[sourceActor.id];
 
+      const fwdMeterInputs = new Map<string, HTMLInputElement>();
+      if (charSchemas.length > 0) {
+        const fwdGridWrap = el('div', 'ls-label', `${sourceActor.name}'s Stats Toward Them`);
+        const fwdGrid = el('div', 'ls-grid');
+        for (const schema of charSchemas) {
+          const curVal = existingBond?.meters?.[schema.id] ?? schema.defaultValue;
+          const wrapCell = el('label', 'ls-label', `${schema.icon} ${schema.label} (${schema.min}..${schema.max})`);
+          const inp = el('input', 'ls-input');
+          inp.type = 'number';
+          inp.min = String(schema.min);
+          inp.max = String(schema.max);
+          inp.step = String(schema.step || 1);
+          inp.value = String(typeof curVal === 'number' ? curVal : schema.defaultValue);
+          wrapCell.append(inp);
+          fwdGrid.append(wrapCell);
+          fwdMeterInputs.set(schema.id, inp);
+        }
+        fwdGridWrap.append(fwdGrid);
+        body.append(fwdGridWrap);
+      }
+
       const revLabelWrap = el('label', 'ls-label', `Their Relation Back to ${sourceActor.name} (Optional)`);
       const revLabelInp = el('input', 'ls-input');
       revLabelInp.placeholder = 'e.g. Younger Brother, Loyal Friend…';
       revLabelInp.value = reverseExisting?.label ?? '';
       revLabelWrap.append(revLabelInp);
+
+      const revMeterInputs = new Map<string, HTMLInputElement>();
+      if (charSchemas.length > 0) {
+        const revGridWrap = el('div', 'ls-label', `Their Stats Back Toward ${sourceActor.name} (Optional)`);
+        const revGrid = el('div', 'ls-grid');
+        for (const schema of charSchemas) {
+          const curVal = reverseExisting?.meters?.[schema.id] ?? schema.defaultValue;
+          const wrapCell = el('label', 'ls-label', `${schema.icon} ${schema.label} (${schema.min}..${schema.max})`);
+          const inp = el('input', 'ls-input');
+          inp.type = 'number';
+          inp.min = String(schema.min);
+          inp.max = String(schema.max);
+          inp.step = String(schema.step || 1);
+          inp.value = String(typeof curVal === 'number' ? curVal : schema.defaultValue);
+          wrapCell.append(inp);
+          revGrid.append(wrapCell);
+          revMeterInputs.set(schema.id, inp);
+        }
+        revGridWrap.append(revGrid);
+        revLabelWrap.append(revGridWrap);
+      }
 
       let selectedCat: BondCategory =
         existingBond?.category ??
@@ -288,6 +396,13 @@ export function openNpcBondEditorModal(
         if (!targetName) return;
         const label = labelInp.value.trim() || 'Acquaintance';
         const attitude = attInp.value.trim();
+        const fwdMeters: Record<string, number> = {};
+        for (const schema of charSchemas) {
+          const raw = Number(fwdMeterInputs.get(schema.id)?.value);
+          if (Number.isFinite(raw)) {
+            fwdMeters[schema.id] = Math.max(schema.min, Math.min(schema.max, Math.round(raw)));
+          }
+        }
         const charactersPatch: Array<{
           id?: string;
           name: string;
@@ -296,17 +411,25 @@ export function openNpcBondEditorModal(
             label: string;
             attitude: string;
             category: BondCategory;
+            meters?: Record<string, number>;
           }>;
         }> = [
           {
             id: sourceActor.id,
             name: sourceActor.name,
-            peerBonds: [{ target: targetName, label, attitude, category: selectedCat }],
+            peerBonds: [{ target: targetName, label, attitude, category: selectedCat, meters: fwdMeters }],
           },
         ];
 
         const revLabel = revLabelInp.value.trim();
         if (revLabel) {
+          const revMeters: Record<string, number> = {};
+          for (const schema of charSchemas) {
+            const raw = Number(revMeterInputs.get(schema.id)?.value);
+            if (Number.isFinite(raw)) {
+              revMeters[schema.id] = Math.max(schema.min, Math.min(schema.max, Math.round(raw)));
+            }
+          }
           charactersPatch.push({
             name: targetName,
             peerBonds: [
@@ -315,6 +438,7 @@ export function openNpcBondEditorModal(
                 label: revLabel,
                 attitude: reverseExisting?.attitude ?? '',
                 category: selectedCat,
+                meters: revMeters,
               },
             ],
           });
@@ -342,7 +466,8 @@ export function renderRelationshipWebSurface(
   ctrl: LumiFrontendController,
   onOpenDossier: (actorId: string) => void,
 ): HTMLElement {
-  const { state } = ctrl.snapshot;
+  const { state, template } = ctrl.snapshot;
+  const charBondSchemas = getTemplateCharBondSchemas(template.stats);
   const wrap = el('div', 'ls-stack');
   const characters = Object.values(state.characters);
   const youName = state.player.name || 'You';
@@ -882,6 +1007,8 @@ export function renderRelationshipWebSurface(
         el('strong', '', pair.aToB?.label || 'Not defined yet'),
         ...(pair.aToB?.attitude ? [el('small', 'ls-muted', pair.aToB.attitude)] : []),
       );
+      const aMetersEl = renderDynamicPeerBondMeters(pair.aToB?.meters, charBondSchemas);
+      if (aMetersEl) boxA.append(aMetersEl);
 
       const boxB = el('div', 'ls-bw-dir-box');
       boxB.append(
@@ -889,6 +1016,8 @@ export function renderRelationshipWebSurface(
         el('strong', '', pair.bToA?.label || 'Not defined yet'),
         ...(pair.bToA?.attitude ? [el('small', 'ls-muted', pair.bToA.attitude)] : []),
       );
+      const bMetersEl = renderDynamicPeerBondMeters(pair.bToA?.meters, charBondSchemas);
+      if (bMetersEl) boxB.append(bMetersEl);
 
       twoCol.append(boxA, boxB);
       pairCard.append(twoCol);

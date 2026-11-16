@@ -430,7 +430,7 @@ export interface NpcBondRecord {
   label: string;
   attitude: string;
   category?: BondCategory;
-  meters: Record<string, number>;
+  meters: Record<string, number | string | boolean>;
   updatedTurn: number;
 }
 
@@ -768,9 +768,7 @@ export interface ExtractedTurnPatch {
       attitude?: string;
       note?: string;
       category?: BondCategory;
-      affinity?: number | string;
-      trust?: number | string;
-      tension?: number | string;
+      meters?: Record<string, StatPatchInput | number | string | boolean>;
       [meterKey: string]: unknown;
     }>;
     secrets?: Array<{

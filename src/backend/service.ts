@@ -189,6 +189,12 @@ export class LumiStatsService {
           actor.meters[toId] = { ...actor.meters[fromId]! };
         }
         delete actor.meters[fromId];
+        for (const bond of Object.values(actor.peerBonds ?? {})) {
+          if (bond.meters && bond.meters[fromId] !== undefined && bond.meters[toId] === undefined) {
+            bond.meters[toId] = bond.meters[fromId];
+          }
+          if (bond.meters) delete bond.meters[fromId];
+        }
       }
 
       for (const mod of nextState.modifiers) {
@@ -212,6 +218,11 @@ export class LumiStatsService {
     for (const actor of Object.values(nextState.characters)) {
       for (const key of Object.keys(actor.meters)) {
         if (!activeCharIds.has(key)) delete actor.meters[key];
+      }
+      for (const bond of Object.values(actor.peerBonds ?? {})) {
+        for (const mk of Object.keys(bond.meters ?? {})) {
+          if (!activeCharIds.has(mk)) delete bond.meters[mk];
+        }
       }
     }
 
@@ -286,6 +297,16 @@ export class LumiStatsService {
       const snap = await this.storage.loadCampaign(resolvedUser, chatId);
       const nextState = structuredClone(snap.state);
       this.reconcileStateWithTemplate(nextState, template);
+      const activeCharStatIds = new Set(
+        template.stats.filter(s => s.enabled && s.scope === 'character').map(s => s.id),
+      );
+      for (const actor of Object.values(nextState.characters)) {
+        for (const bond of Object.values(actor.peerBonds ?? {})) {
+          for (const mk of Object.keys(bond.meters ?? {})) {
+            if (!activeCharStatIds.has(mk)) delete bond.meters[mk];
+          }
+        }
+      }
       recomputeDerivedStats(template.stats, nextState, template.categories ?? []);
       await this.storage.commitCampaign(resolvedUser, chatId, snap.state, nextState, reason);
     });
@@ -776,6 +797,17 @@ export class LumiStatsService {
               ? (payload.statRenames as Array<{ fromId: string; toId: string }>)
               : [];
             this.reconcileStateWithTemplate(nextState, nextTemplate, statRenames);
+
+            const activeCharStatIds = new Set(
+              nextTemplate.stats.filter(s => s.enabled && s.scope === 'character').map(s => s.id),
+            );
+            for (const actor of Object.values(nextState.characters)) {
+              for (const bond of Object.values(actor.peerBonds ?? {})) {
+                for (const mk of Object.keys(bond.meters ?? {})) {
+                  if (!activeCharStatIds.has(mk)) delete bond.meters[mk];
+                }
+              }
+            }
           }
 
           if (payload.patch && typeof payload.patch === 'object') {

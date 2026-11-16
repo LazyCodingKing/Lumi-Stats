@@ -352,11 +352,18 @@ export function compileNarratorContinuity(
         ...characters.filter(c => !c.present),
       ];
       outLines.push(`Cast (${characters.length}):`);
+      const activeCharIds = new Set(charSchemas.map(s => s.id));
+      const formatPeerBond = (b: { toName: string; label: string; meters?: Record<string, number | string | boolean> }) => {
+        const mList = Object.entries(b.meters ?? {})
+          .filter(([mk, mv]) => activeCharIds.has(mk) && mv !== '' && mv !== 'None')
+          .map(([mk, mv]) => `${mk}=${mv}`);
+        return mList.length ? `→${b.toName}(${b.label}: ${mList.join(',')})` : `→${b.toName}(${b.label})`;
+      };
       for (const actor of presentFirst) {
         const peerBonds =
           template.surfaces.trackNpcBonds !== false
             ? Object.values(actor.peerBonds ?? {})
-                .map(b => `→${b.toName}(${b.label})`)
+                .map(formatPeerBond)
                 .join(', ')
             : '';
 
@@ -660,13 +667,20 @@ export function buildCompactFormatExample(
     else charExample[f.id] = '...';
   }
   Object.assign(charExample, flatMeters);
-  if (template.surfaces.trackNpcBonds !== false && (!isCompact || !hasPersistedState)) {
+  if (template.surfaces.trackNpcBonds !== false) {
+    const samplePeerMeters: Record<string, string | number> = {};
+    for (const s of charSchemas) {
+      if (!['meter', 'number', 'clock', 'pips', 'hearts', 'currency'].includes(s.kind)) continue;
+      if (s.displayStyle && s.displayStyle !== 'auto') continue;
+      samplePeerMeters[s.id] = isCompact && hasPersistedState ? '+N' : sampleValueForSchema(s, false) as number;
+    }
     charExample.peerBonds = [
       {
         target: 'NPC2',
         label: 'Relation',
         category: 'family|friend|romance|rival|professional|neutral',
         attitude: 'Why',
+        ...(Object.keys(samplePeerMeters).length ? { meters: samplePeerMeters } : {}),
       },
     ];
   }
@@ -1049,7 +1063,7 @@ export function compileExtractorPrompt(
     `REQUIRED: End EVERY reply (after prose/footers) with <lumi-stats>{JSON}</lumi-stats> (ASCII spaces only; omit unchanged keys).`,
     `1. CAST: Active/mentioned NPCs in "characters[]" ("present": true|false, "location", "bondToPlayer", "bondFromPlayer" if new/changed). Use "+N"/"-N" deltas for numeric meters.`,
     template.surfaces.trackNpcBonds !== false
-      ? `2. PEER BONDS ("peerBonds[]"): {"target","label","category":"family|friend|romance|rival|professional|neutral","attitude"}.`
+      ? `2. PEER BONDS ("peerBonds[]"): Track NPC↔NPC bonds whenever two NPCs interact, or when prose references an offscreen person (e.g. a relative, caller, colleague) or a separate identity/original body (never collapse distinct identities). Set {"target","label","category":"family|friend|romance|rival|professional|neutral","attitude"${charNumeric.length ? `,"meters":{${charNumeric.map(s => `"${s.id}":${s.min}..${s.max}`).join(',')}}` : ''}}.`
       : '',
     `3. UPDATE (${trackedTargets.join(', ')}):`,
     categoryRuleLines.length ? `Category Rules:\n${categoryRuleLines.join('\n')}` : '',
