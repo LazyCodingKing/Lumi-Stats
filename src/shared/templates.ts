@@ -329,6 +329,11 @@ export function defaultCoreTrackersConfig(): CoreTrackersConfig {
     sceneSummaryLabel: 'Scene Beat Summary',
     sceneSummaryInstruction: 'Concise 1-sentence summary of what just happened in the scene.',
     showSceneSummaryInWidget: true,
+    trackScenePresence: true,
+    scenePresenceLabel: 'Present & Away',
+    scenePresenceInstruction:
+      'Format: Present: [List NPCs present in the scene], Away: [List NPCs away/offscreen]. Update EVERY turn whenever anyone enters, leaves, or the scene moves to a new location.',
+    showScenePresenceCard: true,
     trackPlaces: true,
     placesInstruction: 'Extract new or visited locations into zones[] (building/district), places[] (room/spot with tags & brief note), and paths[].',
     trackQuests: true,
@@ -347,7 +352,11 @@ export function defaultCoreTrackersConfig(): CoreTrackersConfig {
     sceneWeatherInstruction: 'Concise weather and immediate atmosphere (e.g. "Clear", "Light Rain", "Tense Indoors").',
     sceneTimeFlowInstruction: 'Estimate elapsed minutes ("mins") realistically for the actions in this beat.',
     scenePillLocked: false,
-    overrides: {},
+    overrides: {
+      scene_presence: {
+        pinnedToHeader: true,
+      },
+    },
   };
 }
 

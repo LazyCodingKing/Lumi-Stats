@@ -714,6 +714,9 @@ export function buildCompactFormatExample(
   if (isCoreActive('scene_summary', core?.trackSceneSummary !== false)) {
     sceneExample.summary = '...';
   }
+  if (isCoreActive('scene_presence', core?.trackScenePresence !== false)) {
+    sceneExample.present = 'Present: [NPC1], Away: [NPC2]';
+  }
 
   const exampleObj: Record<string, unknown> = {
     ...(Object.keys(sceneExample).length ? { scene: sceneExample } : {}),
@@ -903,6 +906,7 @@ export function compileExtractorPrompt(
     isCoreEnabled('player_condition', core?.trackPlayerCondition !== false) ? 'player.condition' : '',
     isCoreEnabled('player_action', Boolean(core?.trackPlayerAction)) ? 'player.notableAction' : '',
     !core?.scenePillLocked ? 'scene' : '',
+    isCoreEnabled('scene_presence', core?.trackScenePresence !== false) ? 'scene.present' : '',
     isCoreEnabled('places', core?.trackPlaces !== false) ? 'places[]' : '',
     isCoreEnabled('quests', core?.trackQuests !== false) ? 'quests[]' : '',
     isCoreEnabled('dispatches', core?.trackDispatches !== false) ? 'dispatches[]' : '',
@@ -958,6 +962,7 @@ export function compileExtractorPrompt(
     };
 
     pushCoreCompact('scene_summary', core?.trackSceneSummary !== false, 'scene.summary(1-sent)', core?.sceneSummaryInstruction, defaultCore.sceneSummaryInstruction);
+    pushCoreCompact('scene_presence', core?.trackScenePresence !== false, 'scene.present(Present: [NPCs here], Away: [NPCs away])', core?.scenePresenceInstruction, defaultCore.scenePresenceInstruction);
     pushCoreCompact('player_attire', core?.trackPlayerAttire !== false, 'player.attire', core?.playerAttireInstruction, defaultCore.playerAttireInstruction);
     pushCoreCompact('player_condition', core?.trackPlayerCondition !== false, 'player.condition', core?.playerConditionInstruction, defaultCore.playerConditionInstruction);
     pushCoreCompact('player_action', Boolean(core?.trackPlayerAction), 'player.notableAction', core?.playerActionInstruction, defaultCore.playerActionInstruction);
@@ -1005,6 +1010,9 @@ export function compileExtractorPrompt(
         : '',
       isCoreEnabled('scene_summary', core?.trackSceneSummary !== false) && resolveCoreInst('scene_summary', core?.sceneSummaryInstruction)
         ? `  • "scene.summary": ${clipAtWordBoundary(resolveCoreInst('scene_summary', core?.sceneSummaryInstruction), 200)}`
+        : '',
+      isCoreEnabled('scene_presence', core?.trackScenePresence !== false) && resolveCoreInst('scene_presence', core?.scenePresenceInstruction)
+        ? `  • "scene.present": ${clipAtWordBoundary(resolveCoreInst('scene_presence', core?.scenePresenceInstruction), 220)}`
         : '',
       isCoreEnabled('places', core?.trackPlaces !== false) && resolveCoreInst('places', core?.placesInstruction)
         ? `  • "places[]/zones[]": ${clipAtWordBoundary(resolveCoreInst('places', core?.placesInstruction), 200)}`

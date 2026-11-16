@@ -163,6 +163,7 @@ export type BuiltInTrackerId =
   | 'player_condition'
   | 'player_action'
   | 'scene_summary'
+  | 'scene_presence'
   | 'places'
   | 'quests'
   | 'dispatches'
@@ -200,6 +201,10 @@ export interface CoreTrackersConfig {
   sceneSummaryLabel?: string;
   sceneSummaryInstruction?: string;
   showSceneSummaryInWidget?: boolean;
+  trackScenePresence?: boolean;
+  scenePresenceLabel?: string;
+  scenePresenceInstruction?: string;
+  showScenePresenceCard?: boolean;
   trackPlaces: boolean;
   placesInstruction?: string;
   trackQuests: boolean;
@@ -629,6 +634,7 @@ export interface CampaignState {
     dateLabel: string;
     weather: string;
     beatSummary: string;
+    presence?: string;
   };
   player: PlayerSceneProfile;
   currentPlaceId: string;
@@ -739,6 +745,9 @@ export interface ExtractedTurnPatch {
     weather?: string;
     elapsedMinutes?: number;
     beatSummary?: string;
+    present?: string;
+    away?: string;
+    presence?: string;
   };
   player?: {
     attire?: string;

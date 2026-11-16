@@ -1678,23 +1678,33 @@ export function applyTurnPatch(
     }
   }
 
-  // Two-way sync between `Present: [...], Away: [...]` (stats.present / scene_presence) and actor.present
-  const presSchema = template.stats.find(
-    s => s.enabled && (s.id === 'present' || s.id === 'scene_presence'),
-  );
-  const rawPresentStatVal =
+  // Two-way sync between Built-In `scene_presence` (or `stats.present`) and `actor.present`
+  const corePresenceEnabled =
+    bypassLocks ||
+    (template.coreTrackers?.trackScenePresence !== false &&
+      !template.coreTrackers?.overrides?.scene_presence?.locked);
+  const rawScenePresence =
+    sceneSource?.present ??
+    sceneSource?.presence ??
     mergedStatsBag.present ??
-    mergedStatsBag.scene_presence ??
-    (sceneSource as Record<string, unknown> | undefined)?.present ??
-    undefined;
-  const rawPresentText =
-    rawPresentStatVal && typeof rawPresentStatVal === 'object' && 'value' in (rawPresentStatVal as Record<string, unknown>)
-      ? String((rawPresentStatVal as StatPatchInput).value ?? '')
-      : typeof rawPresentStatVal === 'string'
-        ? rawPresentStatVal
-        : '';
+    mergedStatsBag.scene_presence;
+  const rawSceneAway = sceneSource?.away;
+  const unwrapText = (val: unknown): string => {
+    if (typeof val === 'string') return val;
+    if (Array.isArray(val)) return val.map(String).join(', ');
+    if (val && typeof val === 'object' && 'value' in (val as Record<string, unknown>)) {
+      return unwrapText((val as StatPatchInput).value);
+    }
+    return '';
+  };
 
-  if (rawPresentText.trim()) {
+  let combinedPresenceText = unwrapText(rawScenePresence).trim();
+  const extraAwayText = unwrapText(rawSceneAway).trim();
+  if (extraAwayText && !/\baway\s*:/i.test(combinedPresenceText)) {
+    combinedPresenceText = `${combinedPresenceText ? `${combinedPresenceText}, ` : ''}Away: [${extraAwayText}]`;
+  }
+
+  if (corePresenceEnabled && combinedPresenceText) {
     const parseNameBucket = (segment: string): string[] =>
       segment
         .replace(/^\[|\]$/g, '')
@@ -1702,13 +1712,19 @@ export function applyTurnPatch(
         .map(s => s.replace(/\s*\([^)]*\)\s*$/g, '').trim())
         .filter(s => s.length > 0 && !/^(?:none|empty|user|player|you)$/i.test(s));
 
-    const presMatch = rawPresentText.match(/present\s*:\s*(?:\[([^\]]*)\]|([^|\n]+?)(?=(?:\s*,?\s*away\s*:|\s*\||$)))/i);
-    const awayMatch = rawPresentText.match(/away\s*:\s*(?:\[([^\]]*)\]|([^|\n]+))/i);
-    const presList = presMatch ? parseNameBucket(presMatch[1] ?? presMatch[2] ?? '') : [];
+    const presMatch = combinedPresenceText.match(
+      /present\s*:\s*(?:\[([^\]]*)\]|([^|\n]+?)(?=(?:\s*,?\s*away\s*:|\s*\||$)))/i,
+    );
+    const awayMatch = combinedPresenceText.match(/away\s*:\s*(?:\[([^\]]*)\]|([^|\n]+))/i);
+    const presList = presMatch
+      ? parseNameBucket(presMatch[1] ?? presMatch[2] ?? '')
+      : !awayMatch
+        ? parseNameBucket(combinedPresenceText)
+        : [];
     const awayList = awayMatch ? parseNameBucket(awayMatch[1] ?? awayMatch[2] ?? '') : [];
 
     const playerLow = (next.player.name || '').trim().toLowerCase();
-    const resolveActorByListToken = (tok: string): CharacterRecord | undefined => {
+    const resolveActorByToken = (tok: string): CharacterRecord | undefined => {
       const low = tok.toLowerCase();
       if (!low || low === playerLow) return undefined;
       return Object.values(next.characters).find(
@@ -1721,7 +1737,7 @@ export function applyTurnPatch(
 
     const presentMatchedIds = new Set<string>();
     for (const tok of presList) {
-      const actor = resolveActorByListToken(tok);
+      const actor = resolveActorByToken(tok);
       if (actor && !explicitlyAbsentCharIds.has(actor.id)) {
         actor.present = true;
         if (next.currentPlaceId) actor.locationId = next.currentPlaceId;
@@ -1729,12 +1745,12 @@ export function applyTurnPatch(
       }
     }
     for (const tok of awayList) {
-      const actor = resolveActorByListToken(tok);
+      const actor = resolveActorByToken(tok);
       if (actor && !explicitlyPresentCharIds.has(actor.id)) {
         actor.present = false;
       }
     }
-    if (presMatch && presList.length > 0 && !awayMatch) {
+    if ((presMatch || presList.length > 0) && presList.length > 0 && !awayMatch) {
       for (const actor of Object.values(next.characters)) {
         if (actor.present && !presentMatchedIds.has(actor.id) && !explicitlyPresentCharIds.has(actor.id)) {
           actor.present = false;
@@ -1743,14 +1759,20 @@ export function applyTurnPatch(
     }
   }
 
-  if (presSchema && Object.keys(next.characters).length > 0) {
+  if (Object.keys(next.characters).length > 0) {
     const presentNames = Object.values(next.characters).filter(c => c.present).map(c => c.name);
     const awayNames = Object.values(next.characters).filter(c => !c.present).map(c => c.name);
     const formattedPresence = `Present: [${presentNames.join(', ')}], Away: [${awayNames.join(', ')}]`;
-    if (!presSchema.locked && !next.stats[presSchema.id]?.locked) {
-      next.stats[presSchema.id] = {
-        id: presSchema.id,
-        scope: presSchema.scope === 'character' ? 'scene' : presSchema.scope,
+    if (corePresenceEnabled) {
+      next.scene.presence = formattedPresence;
+    }
+    const customPresSchema = template.stats.find(
+      s => s.enabled && (s.id === 'present' || s.id === 'scene_presence'),
+    );
+    if (customPresSchema && !customPresSchema.locked && !next.stats[customPresSchema.id]?.locked) {
+      next.stats[customPresSchema.id] = {
+        id: customPresSchema.id,
+        scope: customPresSchema.scope === 'character' ? 'scene' : customPresSchema.scope,
         value: formattedPresence,
         calibrated: true,
         locked: false,

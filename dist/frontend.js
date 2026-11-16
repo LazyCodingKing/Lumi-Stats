@@ -342,6 +342,10 @@ function defaultCoreTrackersConfig() {
     sceneSummaryLabel: "Scene Beat Summary",
     sceneSummaryInstruction: "Concise 1-sentence summary of what just happened in the scene.",
     showSceneSummaryInWidget: true,
+    trackScenePresence: true,
+    scenePresenceLabel: "Present & Away",
+    scenePresenceInstruction: "Format: Present: [List NPCs present in the scene], Away: [List NPCs away/offscreen]. Update EVERY turn whenever anyone enters, leaves, or the scene moves to a new location.",
+    showScenePresenceCard: true,
     trackPlaces: true,
     placesInstruction: "Extract new or visited locations into zones[] (building/district), places[] (room/spot with tags & brief note), and paths[].",
     trackQuests: true,
@@ -360,7 +364,11 @@ function defaultCoreTrackersConfig() {
     sceneWeatherInstruction: 'Concise weather and immediate atmosphere (e.g. "Clear", "Light Rain", "Tense Indoors").',
     sceneTimeFlowInstruction: 'Estimate elapsed minutes ("mins") realistically for the actions in this beat.',
     scenePillLocked: false,
-    overrides: {}
+    overrides: {
+      scene_presence: {
+        pinnedToHeader: true
+      }
+    }
   };
 }
 function defaultDossierFields() {
@@ -616,6 +624,17 @@ function createDefaultTemplate() {
           { value: 20, label: "Stirred / Blushing", description: "Initial spike from suggestive visual cue, towel, or close contact" },
           { value: 0, label: "Composed", description: "Calm physiological state" }
         ]
+      }),
+      createStatSchema({
+        id: "present",
+        label: "Present & Away",
+        icon: "\uD83D\uDC65",
+        scope: "scene",
+        kind: "text",
+        defaultValue: "Present: [], Away: []",
+        volatility: "momentary",
+        pinnedToHeader: true,
+        triggerCues: "Format: Present: [List NPCs present in the scene], Away: [List NPCs away/offscreen]. Update EVERY turn whenever anyone enters, leaves, or the scene moves to a new location."
       }),
       createStatSchema({
         id: "world_tension",
@@ -8632,6 +8651,16 @@ var BUILTIN_TRACKER_META = {
     showCardKey: "showSceneSummaryInWidget",
     supportsCardDisplay: true
   },
+  scene_presence: {
+    title: "Scene Present & Away Roster",
+    defaultIcon: "\uD83D\uDC65",
+    defaultLabel: "Present & Away",
+    toggleKey: "trackScenePresence",
+    labelKey: "scenePresenceLabel",
+    instructionKey: "scenePresenceInstruction",
+    showCardKey: "showScenePresenceCard",
+    supportsCardDisplay: true
+  },
   places: {
     title: "Spatial Atlas (Places, Zones & Paths)",
     defaultIcon: "\uD83D\uDDFA️",
@@ -8695,7 +8724,7 @@ function resolveBuiltInTrackerConfig(core, id) {
     layoutSpan: ov.layoutSpan ?? "full",
     widgetTabId: ov.widgetTabId ?? (id === "quests" || id === "dispatches" ? "world" : "stats"),
     inlineTabId: ov.inlineTabId ?? (id === "quests" || id === "dispatches" ? "world" : "stats"),
-    pinnedToHeader: Boolean(ov.pinnedToHeader),
+    pinnedToHeader: ov.pinnedToHeader !== undefined ? Boolean(ov.pinnedToHeader) : id === "scene_presence",
     locked: Boolean(ov.locked),
     deleted: Boolean(ov.deleted)
   };
@@ -8829,6 +8858,7 @@ function openBuiltinTrackerModal(ctrl, id) {
   ctrl.modals.open({ title: `✏️ Full Edit Built-In Tracker: ${meta.title}`, width: 640, maxHeight: 820 }, (body, close, _handle, modalScope) => {
     let enabled = resolved.enabled;
     let showCard = resolved.showCard;
+    let pinnedToHeader = Boolean(resolved.pinnedToHeader);
     let locked = Boolean(resolved.locked);
     let selectedStyle = resolved.displayStyle ?? "auto";
     let selectedSpan = resolved.layoutSpan ?? "full";
@@ -8870,6 +8900,17 @@ function openBuiltinTrackerModal(ctrl, id) {
         }
       });
       switchGrid.append(cardRow);
+      const pinRow = el("div", "ls-row-between ls-stat-cell");
+      pinRow.append(el("span", "", "\uD83D\uDCCC Pin to Scene Pill"));
+      const pinSlot = el("div");
+      pinRow.append(pinSlot);
+      mountNativeSwitch(ctrl, modalScope, pinSlot, {
+        checked: pinnedToHeader,
+        onChange: (v) => {
+          pinnedToHeader = v;
+        }
+      });
+      switchGrid.append(pinRow);
     }
     const lockRow = el("div", "ls-row-between ls-stat-cell");
     lockRow.append(el("span", "", "\uD83D\uDD12 Lock Value (Skip AI Updates)"));
@@ -9083,6 +9124,7 @@ function openBuiltinTrackerModal(ctrl, id) {
             layoutSpan: selectedSpan,
             widgetTabId: selectedWTab,
             inlineTabId: selectedITab,
+            pinnedToHeader,
             locked,
             deleted: false
           }
@@ -11864,6 +11906,11 @@ function renderCorePlayerAndSceneCards(ctrl, surface, tabId = "stats") {
   if (surface !== "drawer" && state.scene.beatSummary) {
     addCoreCell("scene_summary", state.scene.beatSummary, false);
   }
+  const allActors = Object.values(state.characters);
+  if (allActors.length > 0 || state.scene.presence) {
+    const livePresence = state.scene.presence || `Present: [${allActors.filter((a) => a.present).map((a) => a.name).join(", ")}], Away: [${allActors.filter((a) => !a.present).map((a) => a.name).join(", ")}]`;
+    addCoreCell("scene_presence", livePresence, false);
+  }
   return wrap;
 }
 function renderWorldQuestsAndDispatches(ctrl) {
@@ -12038,7 +12085,15 @@ function buildGameStatusPillStrip(ctrl, options) {
   if (show.weather && banner.weather && banner.weather !== "Clear") {
     main.append(el("span", "ls-chip", `\uD83C\uDF26️ ${banner.weather}`));
   }
-  const presentActors = Object.values(state.characters).filter((c) => c.present);
+  const allActors = Object.values(state.characters);
+  const presentActors = allActors.filter((c) => c.present);
+  const presenceCfg = resolveBuiltInTrackerConfig(template.coreTrackers, "scene_presence");
+  if (show.pinnedStats && presenceCfg.enabled && presenceCfg.pinnedToHeader && (allActors.length > 0 || state.scene.presence)) {
+    const livePresence = state.scene.presence || `Present: [${presentActors.map((a) => a.name).join(", ")}], Away: [${allActors.filter((a) => !a.present).map((a) => a.name).join(", ")}]`;
+    const presChip = el("span", "ls-chip", `${presenceCfg.icon || "\uD83D\uDC65"} ${livePresence}`);
+    presChip.title = livePresence;
+    main.append(presChip);
+  }
   if (show.cast && presentActors.length > 0) {
     const stack = el("div", "ls-avatar-stack");
     stack.title = `In Scene: ${presentActors.map((a) => a.name).join(", ")}`;
@@ -12056,14 +12111,19 @@ function buildGameStatusPillStrip(ctrl, options) {
     }
     main.append(stack);
   }
-  const pinnedSchemas = show.pinnedStats ? template.stats.filter((s) => s.enabled && (s.pinnedToHeader || s.showIn?.pinnedHeader)) : [];
-  for (const schema of pinnedSchemas.slice(0, 3)) {
+  const allPinned = show.pinnedStats ? template.stats.filter((s) => s.enabled && (s.pinnedToHeader || s.showIn?.pinnedHeader)) : [];
+  const presenceSchema = allPinned.find((s) => s.id === "present" || s.id === "scene_presence");
+  const otherPinned = allPinned.filter((s) => s.id !== "present" && s.id !== "scene_presence").slice(0, 3);
+  const pinnedSchemas = presenceSchema ? [presenceSchema, ...otherPinned] : otherPinned;
+  for (const schema of pinnedSchemas) {
     const isChar = schema.scope === "character";
     const firstPresent = presentActors[0] ?? Object.values(state.characters)[0];
     const runtime = isChar ? firstPresent?.meters[schema.id] : state.stats[schema.id];
-    if (!runtime?.calibrated)
+    const isPresenceStat = schema.id === "present" || schema.id === "scene_presence";
+    const allActors = Object.values(state.characters);
+    if (!runtime?.calibrated && !(isPresenceStat && allActors.length > 0))
       continue;
-    const val = runtime.value;
+    const val = isPresenceStat && allActors.length > 0 && !runtime?.calibrated ? `Present: [${presentActors.map((a) => a.name).join(", ")}], Away: [${allActors.filter((a) => !a.present).map((a) => a.name).join(", ")}]` : runtime.value;
     const d = isChar ? firstPresent ? deltas.characterDeltas[firstPresent.id]?.[schema.id] ?? 0 : 0 : deltas.statDeltas[schema.id] ?? 0;
     if (typeof val === "number" && schema.kind !== "currency") {
       const gauge = el("div", "ls-pill-gauge");
@@ -13805,6 +13865,19 @@ var activeStatsFilter = "all";
 var statsSearchQuery = "";
 var QUICK_ADD_STAT_PRESETS = [
   {
+    id: "present",
+    label: "Present & Away",
+    icon: "\uD83D\uDC65",
+    scope: "scene",
+    kind: "text",
+    min: 0,
+    max: 100,
+    defaultValue: "Present: [], Away: []",
+    volatility: "momentary",
+    pinnedToHeader: true,
+    triggerCues: "Format: Present: [List NPCs present in the scene], Away: [List NPCs away/offscreen]. Update EVERY turn whenever anyone enters, leaves, or the scene moves to a new location."
+  },
+  {
     label: "Blush & Fluster",
     icon: "\uD83D\uDC93",
     scope: "character",
@@ -13942,6 +14015,7 @@ var BUILTIN_IDS = [
   { id: "player_condition", group: "player" },
   { id: "player_action", group: "player" },
   { id: "scene_summary", group: "scene_world" },
+  { id: "scene_presence", group: "scene_world" },
   { id: "places", group: "scene_world" },
   { id: "quests", group: "scene_world" },
   { id: "dispatches", group: "scene_world" },
@@ -13999,9 +14073,11 @@ function renderStudioStatsTab(ctrl, compScope, tpl, saveTemplatePatch, forceRedr
   });
   const quickRow = el("div", "ls-row");
   for (const item of QUICK_ADD_STAT_PRESETS) {
-    const exists = tpl.stats.some((s) => s.id === slugifyKey(item.label, "stat"));
+    const targetId = item.id ?? slugifyKey(item.label, "stat");
+    const exists = tpl.stats.some((s) => s.id === targetId);
     const b = btn(`${exists ? "✓ " : "+ "}${item.icon} ${item.label}`, () => {
       const created = createStatSchema({
+        ...item.id ? { id: item.id } : {},
         label: item.label,
         icon: item.icon,
         scope: item.scope,
@@ -14010,6 +14086,7 @@ function renderStudioStatsTab(ctrl, compScope, tpl, saveTemplatePatch, forceRedr
         max: item.max,
         defaultValue: item.defaultValue,
         volatility: item.volatility,
+        ...item.pinnedToHeader ? { pinnedToHeader: true } : {},
         triggerCues: item.triggerCues
       });
       saveTemplatePatch((live) => ({ stats: [...live.stats.filter((s) => s.id !== created.id), created] }), `Added stat "${created.label}"`);
@@ -14222,6 +14299,7 @@ function renderStudioStatsTab(ctrl, compScope, tpl, saveTemplatePatch, forceRedr
         player_condition: "trackPlayerCondition",
         player_action: "trackPlayerAction",
         scene_summary: "trackSceneSummary",
+        scene_presence: "trackScenePresence",
         places: "trackPlaces",
         quests: "trackQuests",
         dispatches: "trackDispatches",

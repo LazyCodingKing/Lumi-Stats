@@ -67,6 +67,16 @@ const BUILTIN_TRACKER_META: Record<BuiltInTrackerId, BuiltInMeta> = {
     showCardKey: 'showSceneSummaryInWidget',
     supportsCardDisplay: true,
   },
+  scene_presence: {
+    title: 'Scene Present & Away Roster',
+    defaultIcon: '👥',
+    defaultLabel: 'Present & Away',
+    toggleKey: 'trackScenePresence',
+    labelKey: 'scenePresenceLabel',
+    instructionKey: 'scenePresenceInstruction',
+    showCardKey: 'showScenePresenceCard',
+    supportsCardDisplay: true,
+  },
   places: {
     title: 'Spatial Atlas (Places, Zones & Paths)',
     defaultIcon: '🗺️',
@@ -141,7 +151,7 @@ export function resolveBuiltInTrackerConfig(
     layoutSpan: ov.layoutSpan ?? 'full',
     widgetTabId: ov.widgetTabId ?? (id === 'quests' || id === 'dispatches' ? 'world' : 'stats'),
     inlineTabId: ov.inlineTabId ?? (id === 'quests' || id === 'dispatches' ? 'world' : 'stats'),
-    pinnedToHeader: Boolean(ov.pinnedToHeader),
+    pinnedToHeader: ov.pinnedToHeader !== undefined ? Boolean(ov.pinnedToHeader) : id === 'scene_presence',
     locked: Boolean(ov.locked),
     deleted: Boolean(ov.deleted),
   };
@@ -336,6 +346,7 @@ export function openBuiltinTrackerModal(
     (body, close, _handle, modalScope) => {
       let enabled = resolved.enabled;
       let showCard = resolved.showCard;
+      let pinnedToHeader = Boolean(resolved.pinnedToHeader);
       let locked = Boolean(resolved.locked);
       let selectedStyle: StatDisplayStyle = resolved.displayStyle ?? 'auto';
       let selectedSpan: StatLayoutSpan = resolved.layoutSpan ?? 'full';
@@ -381,6 +392,18 @@ export function openBuiltinTrackerModal(
           },
         });
         switchGrid.append(cardRow);
+
+        const pinRow = el('div', 'ls-row-between ls-stat-cell');
+        pinRow.append(el('span', '', '📌 Pin to Scene Pill'));
+        const pinSlot = el('div');
+        pinRow.append(pinSlot);
+        mountNativeSwitch(ctrl, modalScope, pinSlot, {
+          checked: pinnedToHeader,
+          onChange: v => {
+            pinnedToHeader = v;
+          },
+        });
+        switchGrid.append(pinRow);
       }
 
       const lockRow = el('div', 'ls-row-between ls-stat-cell');
@@ -616,6 +639,7 @@ export function openBuiltinTrackerModal(
                 layoutSpan: selectedSpan,
                 widgetTabId: selectedWTab,
                 inlineTabId: selectedITab,
+                pinnedToHeader,
                 locked,
                 deleted: false,
               },

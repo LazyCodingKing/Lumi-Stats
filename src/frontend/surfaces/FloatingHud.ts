@@ -8,7 +8,7 @@ import {
   type LumiFrontendController,
 } from '../controller';
 import { svgIcon } from '../icons';
-import { openScenePillEditorModal } from './BuiltinTrackerModals';
+import { openScenePillEditorModal, resolveBuiltInTrackerConfig } from './BuiltinTrackerModals';
 import { renderSurfaceCastRoster } from './CastDossier';
 import { renderRelationshipWebSurface } from './RelationshipWeb';
 import { renderSpatialMapSurface } from './SpatialMap';
@@ -156,7 +156,17 @@ export function buildGameStatusPillStrip(
     main.append(el('span', 'ls-chip', `🌦️ ${banner.weather}`));
   }
 
-  const presentActors = Object.values(state.characters).filter(c => c.present);
+  const allActors = Object.values(state.characters);
+  const presentActors = allActors.filter(c => c.present);
+  const presenceCfg = resolveBuiltInTrackerConfig(template.coreTrackers, 'scene_presence');
+  if (show.pinnedStats && presenceCfg.enabled && presenceCfg.pinnedToHeader && (allActors.length > 0 || state.scene.presence)) {
+    const livePresence =
+      state.scene.presence ||
+      `Present: [${presentActors.map(a => a.name).join(', ')}], Away: [${allActors.filter(a => !a.present).map(a => a.name).join(', ')}]`;
+    const presChip = el('span', 'ls-chip', `${presenceCfg.icon || '👥'} ${livePresence}`);
+    presChip.title = livePresence;
+    main.append(presChip);
+  }
   if (show.cast && presentActors.length > 0) {
     const stack = el('div', 'ls-avatar-stack');
     stack.title = `In Scene: ${presentActors.map(a => a.name).join(', ')}`;

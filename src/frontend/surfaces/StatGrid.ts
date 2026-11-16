@@ -2510,6 +2510,13 @@ export function renderCorePlayerAndSceneCards(
   if (surface !== 'drawer' && state.scene.beatSummary) {
     addCoreCell('scene_summary', state.scene.beatSummary, false);
   }
+  const allActors = Object.values(state.characters);
+  if (allActors.length > 0 || state.scene.presence) {
+    const livePresence =
+      state.scene.presence ||
+      `Present: [${allActors.filter(a => a.present).map(a => a.name).join(', ')}], Away: [${allActors.filter(a => !a.present).map(a => a.name).join(', ')}]`;
+    addCoreCell('scene_presence', livePresence, false);
+  }
 
   return wrap;
 }

@@ -202,6 +202,10 @@ function defaultCoreTrackersConfig() {
     sceneSummaryLabel: "Scene Beat Summary",
     sceneSummaryInstruction: "Concise 1-sentence summary of what just happened in the scene.",
     showSceneSummaryInWidget: true,
+    trackScenePresence: true,
+    scenePresenceLabel: "Present & Away",
+    scenePresenceInstruction: "Format: Present: [List NPCs present in the scene], Away: [List NPCs away/offscreen]. Update EVERY turn whenever anyone enters, leaves, or the scene moves to a new location.",
+    showScenePresenceCard: true,
     trackPlaces: true,
     placesInstruction: "Extract new or visited locations into zones[] (building/district), places[] (room/spot with tags & brief note), and paths[].",
     trackQuests: true,
@@ -220,7 +224,11 @@ function defaultCoreTrackersConfig() {
     sceneWeatherInstruction: 'Concise weather and immediate atmosphere (e.g. "Clear", "Light Rain", "Tense Indoors").',
     sceneTimeFlowInstruction: 'Estimate elapsed minutes ("mins") realistically for the actions in this beat.',
     scenePillLocked: false,
-    overrides: {}
+    overrides: {
+      scene_presence: {
+        pinnedToHeader: true
+      }
+    }
   };
 }
 function defaultDossierFields() {
@@ -476,6 +484,17 @@ function createDefaultTemplate() {
           { value: 20, label: "Stirred / Blushing", description: "Initial spike from suggestive visual cue, towel, or close contact" },
           { value: 0, label: "Composed", description: "Calm physiological state" }
         ]
+      }),
+      createStatSchema({
+        id: "present",
+        label: "Present & Away",
+        icon: "\uD83D\uDC65",
+        scope: "scene",
+        kind: "text",
+        defaultValue: "Present: [], Away: []",
+        volatility: "momentary",
+        pinnedToHeader: true,
+        triggerCues: "Format: Present: [List NPCs present in the scene], Away: [List NPCs away/offscreen]. Update EVERY turn whenever anyone enters, leaves, or the scene moves to a new location."
       }),
       createStatSchema({
         id: "world_tension",
@@ -3080,6 +3099,9 @@ function buildCompactFormatExample(state, template, hasPersistedState = false, r
   if (isCoreActive("scene_summary", core?.trackSceneSummary !== false)) {
     sceneExample.summary = "...";
   }
+  if (isCoreActive("scene_presence", core?.trackScenePresence !== false)) {
+    sceneExample.present = "Present: [NPC1], Away: [NPC2]";
+  }
   const exampleObj = {
     ...Object.keys(sceneExample).length ? { scene: sceneExample } : {},
     ...Object.keys(playerExample).length ? { player: playerExample } : {},
@@ -3216,6 +3238,7 @@ ${formattedRule}`);
     isCoreEnabled("player_condition", core?.trackPlayerCondition !== false) ? "player.condition" : "",
     isCoreEnabled("player_action", Boolean(core?.trackPlayerAction)) ? "player.notableAction" : "",
     !core?.scenePillLocked ? "scene" : "",
+    isCoreEnabled("scene_presence", core?.trackScenePresence !== false) ? "scene.present" : "",
     isCoreEnabled("places", core?.trackPlaces !== false) ? "places[]" : "",
     isCoreEnabled("quests", core?.trackQuests !== false) ? "quests[]" : "",
     isCoreEnabled("dispatches", core?.trackDispatches !== false) ? "dispatches[]" : ""
@@ -3254,6 +3277,7 @@ ${formattedRule}`);
       }
     };
     pushCoreCompact("scene_summary", core?.trackSceneSummary !== false, "scene.summary(1-sent)", core?.sceneSummaryInstruction, defaultCore.sceneSummaryInstruction);
+    pushCoreCompact("scene_presence", core?.trackScenePresence !== false, "scene.present(Present: [NPCs here], Away: [NPCs away])", core?.scenePresenceInstruction, defaultCore.scenePresenceInstruction);
     pushCoreCompact("player_attire", core?.trackPlayerAttire !== false, "player.attire", core?.playerAttireInstruction, defaultCore.playerAttireInstruction);
     pushCoreCompact("player_condition", core?.trackPlayerCondition !== false, "player.condition", core?.playerConditionInstruction, defaultCore.playerConditionInstruction);
     pushCoreCompact("player_action", Boolean(core?.trackPlayerAction), "player.notableAction", core?.playerActionInstruction, defaultCore.playerActionInstruction);
@@ -3281,6 +3305,7 @@ ${formattedRule}`);
       isCoreEnabled("player_condition", core?.trackPlayerCondition !== false) && resolveCoreInst("player_condition", core?.playerConditionInstruction) ? `  \u2022 "player.condition": ${clipAtWordBoundary(resolveCoreInst("player_condition", core?.playerConditionInstruction), 200)}` : "",
       isCoreEnabled("player_action", Boolean(core?.trackPlayerAction)) && resolveCoreInst("player_action", core?.playerActionInstruction) ? `  \u2022 "player.notableAction": ${clipAtWordBoundary(resolveCoreInst("player_action", core?.playerActionInstruction), 200)}` : "",
       isCoreEnabled("scene_summary", core?.trackSceneSummary !== false) && resolveCoreInst("scene_summary", core?.sceneSummaryInstruction) ? `  \u2022 "scene.summary": ${clipAtWordBoundary(resolveCoreInst("scene_summary", core?.sceneSummaryInstruction), 200)}` : "",
+      isCoreEnabled("scene_presence", core?.trackScenePresence !== false) && resolveCoreInst("scene_presence", core?.scenePresenceInstruction) ? `  \u2022 "scene.present": ${clipAtWordBoundary(resolveCoreInst("scene_presence", core?.scenePresenceInstruction), 220)}` : "",
       isCoreEnabled("places", core?.trackPlaces !== false) && resolveCoreInst("places", core?.placesInstruction) ? `  \u2022 "places[]/zones[]": ${clipAtWordBoundary(resolveCoreInst("places", core?.placesInstruction), 200)}` : "",
       isCoreEnabled("quests", core?.trackQuests !== false) && resolveCoreInst("quests", core?.questsInstruction) ? `  \u2022 "quests[]": ${clipAtWordBoundary(resolveCoreInst("quests", core?.questsInstruction), 200)}` : "",
       isCoreEnabled("dispatches", core?.trackDispatches !== false) && resolveCoreInst("dispatches", core?.dispatchesInstruction) ? `  \u2022 "dispatches[]": ${clipAtWordBoundary(resolveCoreInst("dispatches", core?.dispatchesInstruction), 200)}` : "",
@@ -4220,6 +4245,8 @@ function applyTurnPatch(before, template, patch, options = {}) {
     return;
   };
   const sceneLocPrimary = (next.scene.location || "").split(",")[0]?.trim().toLowerCase() || "";
+  const explicitlyPresentCharIds = new Set;
+  const explicitlyAbsentCharIds = new Set;
   if (Array.isArray(patch.characters)) {
     for (const rawChar of patch.characters) {
       if (!rawChar || typeof rawChar !== "object")
@@ -4278,52 +4305,18 @@ function applyTurnPatch(before, template, patch, options = {}) {
         char.present = parsedPresent;
       } else if (charLocMatchesScene) {
         char.present = true;
+      } else if (charLocIsExplicitlyAway) {
+        char.present = false;
       } else if (existing && !existing.present && existing.demeanor === "Unseen" && !charLocIsExplicitlyAway) {
         char.present = true;
       }
+      if (char.present)
+        explicitlyPresentCharIds.add(charId);
+      else
+        explicitlyAbsentCharIds.add(charId);
       if (charLocText) {
         const matchedPlace = next.places[slugifyKey(charLocText, "")] ?? Object.values(next.places).find((p) => p.name.toLowerCase() === charLocLow);
         char.locationId = matchedPlace ? matchedPlace.id : slugifyKey(charLocText, char.locationId || "");
-      }
-      const roleVal = String(rawChar.roleSummary ?? rawCharRec.role_summary ?? rawCharRec.role ?? rawCharRec.relationshipStatus ?? "").trim();
-      const demVal = String(rawChar.demeanor ?? rawCharRec.emotion ?? rawCharRec.mood ?? "").trim();
-      const thoughtVal = String(rawChar.innerThought ?? rawCharRec.inner_thought ?? rawCharRec.thought ?? rawCharRec.internal_thought ?? rawCharRec.inner_monologue ?? rawCharRec.monologue ?? "").trim();
-      const goalVal = String(rawChar.immediateGoal ?? rawCharRec.immediate_goal ?? rawCharRec.goal ?? rawCharRec.aim ?? "").trim();
-      const attireVal = String(rawChar.attire ?? rawCharRec.attire_layers ?? rawCharRec.clothing ?? rawCharRec.outfit ?? "").trim();
-      const isDossierFieldAllowed = (fid) => {
-        if (bypassLocks)
-          return true;
-        const found = template.dossierFields.find((f) => f.id === fid);
-        return Boolean(found && found.enabled && !found.locked);
-      };
-      if (roleVal && isDossierFieldAllowed("role_summary")) {
-        char.roleSummary = cleanStringValue(roleVal);
-        char.fields.role_summary = char.roleSummary;
-      }
-      if (demVal && isDossierFieldAllowed("demeanor")) {
-        char.demeanor = cleanStringValue(demVal);
-        char.fields.demeanor = char.demeanor;
-      }
-      if (thoughtVal && isDossierFieldAllowed("inner_thought")) {
-        char.innerThought = cleanStringValue(thoughtVal);
-        char.fields.inner_thought = char.innerThought;
-      }
-      if (goalVal && isDossierFieldAllowed("immediate_goal")) {
-        char.immediateGoal = cleanStringValue(goalVal);
-        char.fields.immediate_goal = char.immediateGoal;
-      }
-      if (attireVal && isDossierFieldAllowed("attire_layers")) {
-        char.attire = cleanStringValue(attireVal);
-        char.fields.attire_layers = char.attire;
-      }
-      if (Array.isArray(rawChar.aliases)) {
-        char.aliases = [...new Set([...char.aliases, ...rawChar.aliases.map((a) => cleanStringValue(String(a)))])].slice(0, 12);
-      }
-      if (Array.isArray(rawChar.conditions) && isBuiltinWritable("npc_conditions", coreCfg?.trackNpcConditions !== false)) {
-        char.conditions = rawChar.conditions.map((c) => cleanStringValue(String(c))).filter(Boolean).slice(0, 10);
-      }
-      if (typeof rawCharRec.notes === "string") {
-        char.notes = cleanStringValue(rawCharRec.notes).slice(0, 2000);
       }
       const DOSSIER_KEY_ALIASES = {
         role: "role_summary",
@@ -4342,6 +4335,52 @@ function applyTurnPatch(before, template, patch, options = {}) {
         clothing: "attire_layers",
         outfit: "attire_layers"
       };
+      const roleVal = String(rawChar.roleSummary ?? rawCharRec.role_summary ?? rawCharRec.role ?? rawCharRec.relationshipStatus ?? "").trim();
+      const demVal = String(rawChar.demeanor ?? rawCharRec.emotion ?? rawCharRec.mood ?? "").trim();
+      const thoughtVal = String(rawChar.innerThought ?? rawCharRec.inner_thought ?? rawCharRec.thought ?? rawCharRec.internal_thought ?? rawCharRec.inner_monologue ?? rawCharRec.monologue ?? "").trim();
+      const goalVal = String(rawChar.immediateGoal ?? rawCharRec.immediate_goal ?? rawCharRec.goal ?? rawCharRec.aim ?? "").trim();
+      const attireVal = String(rawChar.attire ?? rawCharRec.attire_layers ?? rawCharRec.clothing ?? rawCharRec.outfit ?? "").trim();
+      const isDossierFieldAllowed = (fid) => {
+        if (bypassLocks)
+          return true;
+        const found = template.dossierFields.find((f) => f.id === fid);
+        return Boolean(found && found.enabled && !found.locked);
+      };
+      const assignDossierField = (targetKey, val) => {
+        const cleaned = cleanStringValue(val).slice(0, 1000);
+        if (!cleaned)
+          return;
+        char.fields[targetKey] = cleaned;
+        if (targetKey === "role_summary")
+          char.roleSummary = cleaned;
+        else if (targetKey === "demeanor")
+          char.demeanor = cleaned;
+        else if (targetKey === "inner_thought")
+          char.innerThought = cleaned;
+        else if (targetKey === "immediate_goal")
+          char.immediateGoal = cleaned;
+        else if (targetKey === "attire_layers")
+          char.attire = cleaned;
+      };
+      if (roleVal && isDossierFieldAllowed("role_summary"))
+        assignDossierField("role_summary", roleVal);
+      if (demVal && isDossierFieldAllowed("demeanor"))
+        assignDossierField("demeanor", demVal);
+      if (thoughtVal && isDossierFieldAllowed("inner_thought"))
+        assignDossierField("inner_thought", thoughtVal);
+      if (goalVal && isDossierFieldAllowed("immediate_goal"))
+        assignDossierField("immediate_goal", goalVal);
+      if (attireVal && isDossierFieldAllowed("attire_layers"))
+        assignDossierField("attire_layers", attireVal);
+      if (Array.isArray(rawChar.aliases)) {
+        char.aliases = [...new Set([...char.aliases, ...rawChar.aliases.map((a) => cleanStringValue(String(a)))])].slice(0, 12);
+      }
+      if (Array.isArray(rawChar.conditions) && isBuiltinWritable("npc_conditions", coreCfg?.trackNpcConditions !== false)) {
+        char.conditions = rawChar.conditions.map((c) => cleanStringValue(String(c))).filter(Boolean).slice(0, 10);
+      }
+      if (typeof rawCharRec.notes === "string") {
+        char.notes = cleanStringValue(rawCharRec.notes).slice(0, 2000);
+      }
       if (rawChar.fields && typeof rawChar.fields === "object") {
         for (const [fk, fv] of Object.entries(rawChar.fields)) {
           if (typeof fv === "string" && fv.trim()) {
@@ -4351,18 +4390,7 @@ function applyTurnPatch(before, template, patch, options = {}) {
             const targetKey = matchedField?.id ?? aliasKey ?? slugifyKey(fk, "field");
             if (!bypassLocks && matchedField?.locked)
               continue;
-            const cleanedField = cleanStringValue(fv).slice(0, 1000);
-            char.fields[targetKey] = cleanedField;
-            if (targetKey === "role_summary")
-              char.roleSummary = cleanedField;
-            else if (targetKey === "demeanor")
-              char.demeanor = cleanedField;
-            else if (targetKey === "inner_thought")
-              char.innerThought = cleanedField;
-            else if (targetKey === "immediate_goal")
-              char.immediateGoal = cleanedField;
-            else if (targetKey === "attire_layers")
-              char.attire = cleanedField;
+            assignDossierField(targetKey, fv);
           }
         }
       }
@@ -4428,19 +4456,14 @@ function applyTurnPatch(before, template, patch, options = {}) {
       for (const [ck, cv] of Object.entries(rawCharRec)) {
         if (RESERVED_CHAR_KEYS.has(ck) || cv === null || cv === undefined)
           continue;
-        const isPatchObj = typeof cv === "object" && !Array.isArray(cv) && "value" in cv;
-        if (typeof cv === "number" || typeof cv === "boolean" || typeof cv === "string" || isPatchObj) {
-          const matchedStat = matchStatSchema(template.stats, ck, "character");
-          if (matchedStat) {
-            combinedMeters[ck] = cv;
-            continue;
-          }
-          const matchedField = template.dossierFields.find((f) => f.id === ck || slugifyKey(f.label, "") === slugifyKey(ck, ""));
+        if (typeof cv === "number" || typeof cv === "boolean" || typeof cv === "string") {
+          const aliasKey = DOSSIER_KEY_ALIASES[ck.toLowerCase()] ?? DOSSIER_KEY_ALIASES[slugifyKey(ck, "")];
+          const lookupKey = aliasKey ?? ck;
+          const matchedField = template.dossierFields.find((f) => f.id === lookupKey || slugifyKey(f.label, "") === slugifyKey(ck, ""));
           if (matchedField && typeof cv === "string") {
-            if (bypassLocks || matchedField.enabled && !matchedField.locked) {
-              char.fields[matchedField.id] = cleanStringValue(cv).slice(0, 1000);
-            }
-          } else if (!matchedField) {
+            if (bypassLocks || !matchedField.locked)
+              assignDossierField(matchedField.id, cv);
+          } else {
             combinedMeters[ck] = cv;
           }
         }
@@ -4448,9 +4471,12 @@ function applyTurnPatch(before, template, patch, options = {}) {
       for (const [mk, mv] of Object.entries(combinedMeters)) {
         const schema = matchStatSchema(template.stats, mk, "character");
         if (!schema) {
-          const matchedField = template.dossierFields.find((f) => f.id === mk || slugifyKey(f.label, "") === slugifyKey(mk, ""));
+          const aliasKey = DOSSIER_KEY_ALIASES[mk.toLowerCase()] ?? DOSSIER_KEY_ALIASES[slugifyKey(mk, "")];
+          const lookupKey = aliasKey ?? mk;
+          const matchedField = template.dossierFields.find((f) => f.id === lookupKey || slugifyKey(f.label, "") === slugifyKey(mk, ""));
           if (matchedField && typeof mv === "string" && mv.trim()) {
-            char.fields[matchedField.id] = cleanStringValue(mv).slice(0, 1000);
+            if (bypassLocks || !matchedField.locked)
+              assignDossierField(matchedField.id, mv);
           }
           continue;
         }
@@ -4781,10 +4807,15 @@ function applyTurnPatch(before, template, patch, options = {}) {
     if (prevPlaceId && prevPlaceId !== placeId && next.places[prevPlaceId]) {
       upsertPathEdge({ fromId: prevPlaceId, toId: placeId });
     }
+    const locationChanged = Boolean(prevPlaceId && prevPlaceId !== placeId);
     next.currentPlaceId = placeId;
     for (const actor of Object.values(next.characters)) {
-      if (actor.present) {
+      if (!actor.present)
+        continue;
+      if (!locationChanged || explicitlyPresentCharIds.has(actor.id)) {
         actor.locationId = placeId;
+      } else if (!explicitlyAbsentCharIds.has(actor.id)) {
+        actor.present = false;
       }
     }
   }
@@ -4908,6 +4939,79 @@ function applyTurnPatch(before, template, patch, options = {}) {
       });
       if (next.dispatches.length > 30)
         next.dispatches.shift();
+    }
+  }
+  const corePresenceEnabled = bypassLocks || template.coreTrackers?.trackScenePresence !== false && !template.coreTrackers?.overrides?.scene_presence?.locked;
+  const rawScenePresence = sceneSource?.present ?? sceneSource?.presence ?? mergedStatsBag.present ?? mergedStatsBag.scene_presence;
+  const rawSceneAway = sceneSource?.away;
+  const unwrapText = (val) => {
+    if (typeof val === "string")
+      return val;
+    if (Array.isArray(val))
+      return val.map(String).join(", ");
+    if (val && typeof val === "object" && "value" in val) {
+      return unwrapText(val.value);
+    }
+    return "";
+  };
+  let combinedPresenceText = unwrapText(rawScenePresence).trim();
+  const extraAwayText = unwrapText(rawSceneAway).trim();
+  if (extraAwayText && !/\baway\s*:/i.test(combinedPresenceText)) {
+    combinedPresenceText = `${combinedPresenceText ? `${combinedPresenceText}, ` : ""}Away: [${extraAwayText}]`;
+  }
+  if (corePresenceEnabled && combinedPresenceText) {
+    const parseNameBucket = (segment) => segment.replace(/^\[|\]$/g, "").split(/[,;|]/).map((s) => s.replace(/\s*\([^)]*\)\s*$/g, "").trim()).filter((s) => s.length > 0 && !/^(?:none|empty|user|player|you)$/i.test(s));
+    const presMatch = combinedPresenceText.match(/present\s*:\s*(?:\[([^\]]*)\]|([^|\n]+?)(?=(?:\s*,?\s*away\s*:|\s*\||$)))/i);
+    const awayMatch = combinedPresenceText.match(/away\s*:\s*(?:\[([^\]]*)\]|([^|\n]+))/i);
+    const presList = presMatch ? parseNameBucket(presMatch[1] ?? presMatch[2] ?? "") : !awayMatch ? parseNameBucket(combinedPresenceText) : [];
+    const awayList = awayMatch ? parseNameBucket(awayMatch[1] ?? awayMatch[2] ?? "") : [];
+    const playerLow = (next.player.name || "").trim().toLowerCase();
+    const resolveActorByToken = (tok) => {
+      const low = tok.toLowerCase();
+      if (!low || low === playerLow)
+        return;
+      return Object.values(next.characters).find((c) => c.name.toLowerCase() === low || c.id === slugifyKey(low, "") || c.aliases.some((a) => a.toLowerCase() === low));
+    };
+    const presentMatchedIds = new Set;
+    for (const tok of presList) {
+      const actor = resolveActorByToken(tok);
+      if (actor && !explicitlyAbsentCharIds.has(actor.id)) {
+        actor.present = true;
+        if (next.currentPlaceId)
+          actor.locationId = next.currentPlaceId;
+        presentMatchedIds.add(actor.id);
+      }
+    }
+    for (const tok of awayList) {
+      const actor = resolveActorByToken(tok);
+      if (actor && !explicitlyPresentCharIds.has(actor.id)) {
+        actor.present = false;
+      }
+    }
+    if ((presMatch || presList.length > 0) && presList.length > 0 && !awayMatch) {
+      for (const actor of Object.values(next.characters)) {
+        if (actor.present && !presentMatchedIds.has(actor.id) && !explicitlyPresentCharIds.has(actor.id)) {
+          actor.present = false;
+        }
+      }
+    }
+  }
+  if (Object.keys(next.characters).length > 0) {
+    const presentNames = Object.values(next.characters).filter((c) => c.present).map((c) => c.name);
+    const awayNames = Object.values(next.characters).filter((c) => !c.present).map((c) => c.name);
+    const formattedPresence = `Present: [${presentNames.join(", ")}], Away: [${awayNames.join(", ")}]`;
+    if (corePresenceEnabled) {
+      next.scene.presence = formattedPresence;
+    }
+    const customPresSchema = template.stats.find((s) => s.enabled && (s.id === "present" || s.id === "scene_presence"));
+    if (customPresSchema && !customPresSchema.locked && !next.stats[customPresSchema.id]?.locked) {
+      next.stats[customPresSchema.id] = {
+        id: customPresSchema.id,
+        scope: customPresSchema.scope === "character" ? "scene" : customPresSchema.scope,
+        value: formattedPresence,
+        calibrated: true,
+        locked: false
+      };
     }
   }
   recomputeDerivedStats(template.stats, next, template.categories ?? []);
